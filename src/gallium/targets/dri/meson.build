@@ -33,6 +33,21 @@ if with_ld_dynamic_list
   gallium_dri_link_depends += files('../dri.dyn')
 endif
 
+# Android/bionic, the same treatment the libgl-xlib target already carries.
+# --undefined-version: API < 29 has no ELF TLS, so clang emits emulated TLS and
+# the _mesa_glapi_tls_* names dri.sym asks for exist only as __emutls_v.<name>,
+# which lld >= 17 treats as a hard error.  -llog is for __android_log_write in
+# src/util/log.c, -lsync for the <android/sync.h> half of src/util/libsync.h.
+gallium_dri_bionic_link_args = []
+if host_machine.system() == 'android'
+  gallium_dri_bionic_link_args += [
+    '-Wl,--undefined-version',
+    '-llog',
+    '-lsync',
+  ]
+endif
+gallium_dri_ld_args += gallium_dri_bionic_link_args
+
 if get_option('unversion-libgallium') or with_platform_android
   libgallium_name = 'gallium_dri'
 else

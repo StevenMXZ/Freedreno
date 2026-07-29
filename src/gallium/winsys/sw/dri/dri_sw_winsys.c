@@ -159,7 +159,13 @@ dri_sw_displaytarget_create(struct sw_winsys *winsys,
    dri_sw_dt->fd = -1;
 
 #ifdef HAVE_SYS_SHM_H
-   if (ws->lf->put_image_shm)
+   /* pipe_loader_vk_probe_dri() builds this winsys with lf == NULL on purpose:
+    * under kopper the images come from the VkSwapchain, so there is no loader
+    * to put_image through. Every other ->lf-> use here is on a presentation
+    * path such a winsys never reaches; this one is on the allocation path and
+    * runs regardless.
+    */
+   if (ws->lf && ws->lf->put_image_shm)
       dri_sw_dt->data = alloc_shm(dri_sw_dt, size);
 #endif
 

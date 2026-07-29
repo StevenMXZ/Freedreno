@@ -8,6 +8,18 @@
                 _mesa_glapi_set_dispatch;
                 _mesa_glapi_tls_Context;
                 _mesa_glapi_tls_Dispatch;
+                # Android/bionic (Winlator) build: API < 29 has no ELF TLS, so
+                # clang lowers the two __thread variables above to emulated TLS
+                # and they exist only under these mangled control-object names.
+                # libGL.so imports them from libgallium -- in the dri layout the
+                # two shared objects must share one dispatch pointer -- so the
+                # "local: *" below would otherwise demote them and libGL fails
+                # to link with 2600+ undefined references.  Under real ELF TLS
+                # these names do not exist; the android-only
+                # -Wl,--undefined-version in meson.build lets the unmatched
+                # assignment pass either way.
+                __emutls_v._mesa_glapi_tls_Context;
+                __emutls_v._mesa_glapi_tls_Dispatch;
 
 		ddebug_screen_create;
 		noop_screen_create;
