@@ -20,23 +20,25 @@ libfreedreno_layout = static_library(
   build_by_default : false,
 )
 
-foreach major : ['5', '6']
-  test(
-    'fd' + major + '_layout',
-    executable(
+if with_tests
+  foreach major : ['5', '6']
+    test(
       'fd' + major + '_layout',
-      [
-        'fd_layout_test.c',
-        'fd' + major + '_layout_test.c',
-        freedreno_xml_header_files,
-      ],
-      link_with: libfreedreno_layout,
-      dependencies : [idep_mesautil, idep_libfreedreno_common],
-      include_directories: [
-        inc_include,
-        inc_src,
-        inc_freedreno],
-    ),
-    suite : ['freedreno'],
-  )
-endforeach
+      executable(
+        'fd' + major + '_layout',
+        [
+          'fd_layout_test.c',
+          'fd' + major + '_layout_test.c',
+          freedreno_xml_header_files,
+        ],
+        link_with: libfreedreno_layout,
+        dependencies : [idep_mesautil, idep_libfreedreno_common],
+        include_directories: [
+          inc_include,
+          inc_src,
+          inc_freedreno],
+      ),
+      suite : ['freedreno'],
+    )
+  endforeach
+endif
