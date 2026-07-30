@@ -6,6 +6,7 @@
  *    Rob Clark <robclark@freedesktop.org>
  */
 
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -25,6 +26,8 @@ struct fd_device *virtio_device_new(int fd, drmVersionPtr version);
 #endif
 #ifdef HAVE_FREEDRENO_KGSL
 struct fd_device *kgsl_device_new(int fd);
+/* Same node turnip opens; kgsl exposes no way to enumerate it. */
+#define FD_KGSL_DEVICE_PATH "/dev/kgsl-3d0"
 #endif
 
 uint64_t os_page_size = 4096;
@@ -36,6 +39,7 @@ fd_device_new(int fd)
    drmVersionPtr version = NULL;
    bool use_heap = false;
    bool supports_heap = true;
+   int dev_fd = fd;
 
    os_get_page_size(&os_page_size);
 
@@ -84,6 +88,31 @@ fd_device_new(int fd)
       DEBUG_MSG("probing for kgsl device");
       dev = kgsl_device_new(fd);
 
+      if (!dev) {
+         /* The fd we were handed is not kgsl, which is the normal case under an
+          * X server whose DRI3 Open does not return a device fd (Winlator
+          * answers with a memfd).  Open the node ourselves instead of giving up.
+          *
+          * Only in this branch do we take ownership of the caller's fd.  Both
+          * in-tree callers are fine with that.
+          */
+         int kgsl_fd = open(FD_KGSL_DEVICE_PATH, O_RDWR | O_CLOEXEC);
+
+         if (kgsl_fd >= 0) {
+            dev = kgsl_device_new(kgsl_fd);
+            if (dev) {
+               DEBUG_MSG("opened %s directly", FD_KGSL_DEVICE_PATH);
+               close(fd);
+               dev_fd = kgsl_fd;
+            } else {
+               close(kgsl_fd);
+            }
+         } else {
+            DEBUG_MSG("cannot open %s: %s", FD_KGSL_DEVICE_PATH,
+                      strerror(errno));
+         }
+      }
+
       /* kgsl has no userspace-fence support, which the bo heaps rely on: */
       supports_heap = false;
 #endif
@@ -108,7 +137,7 @@ out:
    fd_rd_output_init(&dev->rd, util_get_process_name());
 
    p_atomic_set(&dev->refcnt, 1);
-   dev->fd = fd;
+   dev->fd = dev_fd;
    dev->handle_table =
       _mesa_hash_table_create(NULL, _mesa_hash_u32, _mesa_key_u32_equal);
    dev->name_table =
