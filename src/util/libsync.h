@@ -118,36 +118,6 @@ struct sync_file_info {
 #endif
 
 
-static inline int sync_wait(int fd, int timeout)
-{
-	struct pollfd fds = {0};
-	int ret;
-	struct timespec poll_start, poll_end;
-
-	fds.fd = fd;
-	fds.events = POLLIN;
-
-	do {
-		clock_gettime(CLOCK_MONOTONIC, &poll_start);
-		ret = poll(&fds, 1, timeout);
-		clock_gettime(CLOCK_MONOTONIC, &poll_end);
-		if (ret > 0) {
-			if (fds.revents & (POLLERR | POLLNVAL)) {
-				errno = EINVAL;
-				return -1;
-			}
-			return 0;
-		} else if (ret == 0) {
-			errno = ETIME;
-			return -1;
-		}
-		timeout -= (poll_end.tv_sec - poll_start.tv_sec) * 1000 +
-			(poll_end.tv_nsec - poll_end.tv_nsec) / 1000000;
-	} while (ret == -1 && (errno == EINTR || errno == EAGAIN));
-
-	return ret;
-}
-
 static inline int sync_merge(const char *name, int fd1, int fd2)
 {
 	struct sync_merge_data data = {{0}};
@@ -205,6 +175,43 @@ static inline struct sync_file_info* sync_file_info(int32_t fd)
 }
 
 #endif /* DETECT_OS_ANDROID */
+
+#ifndef HAVE_SYNC_WAIT
+/* sync_wait() is only a poll() on the fence fd, so it can always be provided
+ * locally.  This is needed when building against the Android NDK, whose
+ * <android/sync.h> exposes sync_merge()/sync_file_info() but not sync_wait():
+ * that one lives in the platform's libsync, which the NDK does not ship.
+ */
+static inline int sync_wait(int fd, int timeout)
+{
+	struct pollfd fds = {0};
+	int ret;
+	struct timespec poll_start, poll_end;
+
+	fds.fd = fd;
+	fds.events = POLLIN;
+
+	do {
+		clock_gettime(CLOCK_MONOTONIC, &poll_start);
+		ret = poll(&fds, 1, timeout);
+		clock_gettime(CLOCK_MONOTONIC, &poll_end);
+		if (ret > 0) {
+			if (fds.revents & (POLLERR | POLLNVAL)) {
+				errno = EINVAL;
+				return -1;
+			}
+			return 0;
+		} else if (ret == 0) {
+			errno = ETIME;
+			return -1;
+		}
+		timeout -= (poll_end.tv_sec - poll_start.tv_sec) * 1000 +
+			(poll_end.tv_nsec - poll_end.tv_nsec) / 1000000;
+	} while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+
+	return ret;
+}
+#endif /* HAVE_SYNC_WAIT */
 
 /* accumulate fd2 into fd1.  If *fd1 is not a valid fd then dup fd2,
  * otherwise sync_merge() and close the old *fd1.  This can be used

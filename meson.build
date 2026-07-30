@@ -1716,6 +1716,10 @@ functions_to_detect = {
   'posix_fallocate': '',
   'secure_getenv': '',
   'sysconf': '#include <unistd.h>',
+  # Provided by the platform libsync on AOSP, but not by the NDK, which ships
+  # only the sync_merge()/sync_file_info() half of <android/sync.h>.  When it
+  # is missing, util/libsync.h falls back to its own poll() implementation.
+  'sync_wait': '#include <android/sync.h>',
 }
 
 foreach f, prefix: functions_to_detect
