@@ -504,6 +504,29 @@ fd_get_device_reset_status(struct pipe_context *pctx)
    return status;
 }
 
+/**
+ * Variant for backends that report reset status directly (ie. kgsl, which
+ * exposes KGSL_PROP_GPU_RESET_STAT per-context rather than fault counters).
+ */
+static enum pipe_reset_status
+fd_get_device_reset_status_direct(struct pipe_context *pctx)
+{
+   static const enum pipe_reset_status status_map[] = {
+      [FD_RESET_NO_ERROR] = PIPE_NO_RESET,
+      [FD_RESET_GUILTY]   = PIPE_GUILTY_CONTEXT_RESET,
+      [FD_RESET_INNOCENT] = PIPE_INNOCENT_CONTEXT_RESET,
+      [FD_RESET_UNKNOWN]  = PIPE_UNKNOWN_CONTEXT_RESET,
+   };
+   struct fd_context *ctx = fd_context(pctx);
+   enum fd_reset_status status;
+
+   if (fd_pipe_get_reset_status(ctx->pipe, &status))
+      return PIPE_NO_RESET;
+
+   assert(status < ARRAY_SIZE(status_map));
+   return status_map[status];
+}
+
 static bool
 fd_trace_record_ts(struct u_trace *ut, void *cs, void *timestamps,
                    uint64_t offset_B, uint32_t flags)
@@ -671,7 +694,11 @@ fd_context_init(struct fd_context *ctx, struct pipe_screen *pscreen,
 
    ctx->in_fence_fd = -1;
 
-   if (fd_device_version(screen->dev) >= FD_VERSION_ROBUSTNESS) {
+   /* Backends reporting reset status directly have no fault counters to
+    * seed here (and would just log an unsupported-param error):
+    */
+   if (!(fd_get_features(screen->dev) & FD_FEATURE_DIRECT_RESET) &&
+       fd_device_version(screen->dev) >= FD_VERSION_ROBUSTNESS) {
       ctx->context_reset_count = fd_get_reset_count(ctx, true);
       ctx->global_reset_count = fd_get_reset_count(ctx, false);
    }
@@ -690,7 +717,10 @@ fd_context_init(struct fd_context *ctx, struct pipe_screen *pscreen,
    pctx->flush = fd_context_flush;
    pctx->emit_string_marker = fd_emit_string_marker;
    pctx->set_debug_callback = fd_set_debug_callback;
-   pctx->get_device_reset_status = fd_get_device_reset_status;
+   if (fd_get_features(screen->dev) & FD_FEATURE_DIRECT_RESET)
+      pctx->get_device_reset_status = fd_get_device_reset_status_direct;
+   else
+      pctx->get_device_reset_status = fd_get_device_reset_status;
    pctx->create_fence_fd = fd_create_pipe_fence_fd;
    pctx->fence_server_sync = fd_pipe_fence_server_sync;
    pctx->fence_server_signal = fd_pipe_fence_server_signal;

@@ -23,6 +23,9 @@ struct fd_device *msm_device_new(int fd, drmVersionPtr version);
 #ifdef HAVE_FREEDRENO_VIRTIO
 struct fd_device *virtio_device_new(int fd, drmVersionPtr version);
 #endif
+#ifdef HAVE_FREEDRENO_KGSL
+struct fd_device *kgsl_device_new(int fd);
+#endif
 
 uint64_t os_page_size = 4096;
 
@@ -30,17 +33,23 @@ struct fd_device *
 fd_device_new(int fd)
 {
    struct fd_device *dev = NULL;
-   drmVersionPtr version;
+   drmVersionPtr version = NULL;
    bool use_heap = false;
+   bool supports_heap = true;
 
    os_get_page_size(&os_page_size);
 
-   /* figure out if we are kgsl or msm drm driver: */
+#ifdef HAVE_LIBDRM
+   /* figure out which drm driver we are talking to, if any: */
    version = drmGetVersion(fd);
-   if (!version) {
-      ERROR_MSG("cannot get version: %s", strerror(errno));
-      return NULL;
-   }
+   if (!version)
+      DEBUG_MSG("cannot get drm version: %s", strerror(errno));
+#endif
+
+   /* Note that kgsl is not a DRM driver at all, so drmGetVersion() fails on
+    * it.  A NULL version is therefore not fatal: it is the normal case when
+    * the fd refers to /dev/kgsl-3d0, which the kgsl backend probes for below.
+    */
 
 #ifdef HAVE_FREEDRENO_VIRTIO
    if (debug_get_bool_option("FD_FORCE_VTEST", false)) {
@@ -48,7 +57,7 @@ fd_device_new(int fd)
       dev = virtio_device_new(-1, version);
    } else
 #endif
-   if (!strcmp(version->name, "msm")) {
+   if (version && !strcmp(version->name, "msm")) {
       DEBUG_MSG("msm DRM device");
       if (version->version_major != 1) {
          ERROR_MSG("unsupported version: %u.%u.%u", version->version_major,
@@ -58,7 +67,7 @@ fd_device_new(int fd)
 
       dev = msm_device_new(fd, version);
 #ifdef HAVE_FREEDRENO_VIRTIO
-   } else if (!strcmp(version->name, "virtio_gpu")) {
+   } else if (version && !strcmp(version->name, "virtio_gpu")) {
       DEBUG_MSG("virtio_gpu DRM device");
       dev = virtio_device_new(fd, version);
       /* Only devices that support a hypervisor are a6xx+, so avoid the
@@ -66,20 +75,29 @@ fd_device_new(int fd)
        */
       use_heap = true;
 #endif
-#if HAVE_FREEDRENO_KGSL
-   } else if (!strcmp(version->name, "kgsl")) {
-      DEBUG_MSG("kgsl DRM device");
+#ifdef HAVE_FREEDRENO_KGSL
+   } else {
+      /* No DRM driver matched, so this may be a kgsl device node.
+       * kgsl_device_new() probes with KGSL_PROP_DEVICE_INFO and returns NULL
+       * if the fd is not actually kgsl.
+       */
+      DEBUG_MSG("probing for kgsl device");
       dev = kgsl_device_new(fd);
+
+      /* kgsl has no userspace-fence support, which the bo heaps rely on: */
+      supports_heap = false;
 #endif
    }
 
    if (!dev) {
-      INFO_MSG("unsupported device: %s", version->name);
+      INFO_MSG("unsupported device: %s", version ? version->name : "non-drm");
       goto out;
    }
 
 out:
+#ifdef HAVE_LIBDRM
    drmFreeVersion(version);
+#endif
 
    if (!dev)
       return NULL;
@@ -102,7 +120,7 @@ out:
    simple_mtx_init(&dev->submit_lock, mtx_plain);
    simple_mtx_init(&dev->suballoc_lock, mtx_plain);
 
-   if (!use_heap) {
+   if (supports_heap && !use_heap) {
       struct fd_pipe *pipe = fd_pipe_new(dev, FD_PIPE_3D);
 
       if (!pipe)
@@ -117,7 +135,7 @@ out:
       fd_pipe_del(pipe);
    }
 
-   if (use_heap) {
+   if (supports_heap && use_heap) {
       dev->ring_heap = fd_bo_heap_new(dev, RING_FLAGS);
       dev->default_heap = fd_bo_heap_new(dev, 0);
    }
@@ -242,11 +260,22 @@ fd_dbg(void)
    return debug_get_option_libgl();
 }
 
+uint32_t
+fd_get_features(struct fd_device *dev)
+{
+   return dev->features;
+}
+
 bool
 fd_has_syncobj(struct fd_device *dev)
 {
+#ifdef HAVE_LIBDRM
    uint64_t value;
    if (drmGetCap(dev->fd, DRM_CAP_SYNCOBJ, &value))
       return false;
    return value && dev->version >= FD_VERSION_FENCE_FD;
+#else
+   /* kgsl is not a DRM device and has no syncobj support */
+   return false;
+#endif
 }

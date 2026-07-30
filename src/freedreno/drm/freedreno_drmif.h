@@ -51,6 +51,18 @@ enum fd_param_id {
 };
 
 /**
+ * GPU reset status, as reported directly by the kernel driver.  Only
+ * meaningful on backends advertising FD_FEATURE_DIRECT_RESET; backends
+ * without it report resets indirectly via FD_CTX_FAULTS/FD_GLOBAL_FAULTS.
+ */
+enum fd_reset_status {
+   FD_RESET_NO_ERROR,
+   FD_RESET_GUILTY,
+   FD_RESET_INNOCENT,
+   FD_RESET_UNKNOWN,
+};
+
+/**
  * Helper for fence/seqno comparisions which deals properly with rollover.
  * Returns true if fence 'a' is before fence 'b'
  */
@@ -181,6 +193,20 @@ enum fd_version {
 enum fd_version fd_device_version(struct fd_device *dev);
 void fd_device_disable_explicit_sync_heuristic(struct fd_device *dev);
 
+/**
+ * Optional backend capabilities.  Unlike fd_version, which describes a
+ * linear progression of the msm UABI, these are orthogonal opt-ins used
+ * where a backend implements something in a fundamentally different way
+ * (ie. kgsl, which is not a DRM driver at all).
+ */
+enum fd_features {
+   /* Kernel reports reset status directly, rather than via fault counters */
+   FD_FEATURE_DIRECT_RESET = BITSET_BIT(0),
+   /* Shared buffers must be allocated externally and imported */
+   FD_FEATURE_IMPORT_DMABUF = BITSET_BIT(1),
+};
+
+uint32_t fd_get_features(struct fd_device *dev);
 bool fd_has_syncobj(struct fd_device *dev);
 
 /* pipe functions:
@@ -202,6 +228,8 @@ int fd_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence);
 /* timeout in nanosec */
 int fd_pipe_wait_timeout(struct fd_pipe *pipe, const struct fd_fence *fence,
                          uint64_t timeout);
+/* Only valid if the device advertises FD_FEATURE_DIRECT_RESET */
+int fd_pipe_get_reset_status(struct fd_pipe *pipe, enum fd_reset_status *status);
 
 /* buffer-object functions:
  */

@@ -191,6 +191,7 @@ struct fd_device {
    int fd;
    enum fd_version version;
    int32_t refcnt;
+   uint32_t features;   /* bitmask of enum fd_features */
 
    /* tables to keep track of bo's, to avoid "evil-twin" fd_bo objects:
     *
@@ -296,6 +297,12 @@ struct fd_pipe_funcs {
    struct fd_ringbuffer *(*ringbuffer_new_object)(struct fd_pipe *pipe,
                                                   uint32_t size);
    struct fd_submit *(*submit_new)(struct fd_pipe *pipe);
+
+   /**
+    * Query reset status directly from the kernel.  Only required for
+    * backends advertising FD_FEATURE_DIRECT_RESET.
+    */
+   int (*reset_status)(struct fd_pipe *pipe, enum fd_reset_status *status);
 
    /**
     * Flush any deferred submits (if deferred submits are supported by
