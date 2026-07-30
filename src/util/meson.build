@@ -328,6 +328,14 @@ else
     'u_debug_symbol.c',
     'u_debug_symbol.h',
   )
+  if host_machine.system() == 'android'
+    # log.c and os_misc.c call __android_log_write whenever DETECT_OS_ANDROID
+    # is true, which follows from the compiler defining __ANDROID__ and not
+    # from -Dplatforms=android.  A cross build for Android that selects a
+    # different window system (ie. platforms=x11 under Winlator) still needs
+    # liblog, or everything linked -Wl,--no-undefined fails to resolve it.
+    deps_for_libmesa_util += cc.find_library('log')
+  endif
 endif
 
 if with_platform_haiku
