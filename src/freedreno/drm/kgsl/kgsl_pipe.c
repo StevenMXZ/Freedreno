@@ -221,13 +221,17 @@ kgsl_pipe_new(struct fd_device *dev, enum fd_pipe_id id, unsigned prio)
    pipe->funcs = &funcs;
 
    struct kgsl_devinfo info;
-   if (kgsl_get_prop(dev->fd, KGSL_PROP_DEVICE_INFO, &info, sizeof(info)))
+   if (kgsl_get_prop(dev->fd, KGSL_PROP_DEVICE_INFO, &info, sizeof(info))) {
+      ERROR_MSG("KGSL_PROP_DEVICE_INFO failed (%s)", strerror(errno));
       goto fail;
+   }
 
    uint64_t gmem_iova;
    if (kgsl_get_prop(dev->fd, KGSL_PROP_UCHE_GMEM_VADDR, &gmem_iova,
-                     sizeof(gmem_iova)))
+                     sizeof(gmem_iova))) {
+      ERROR_MSG("KGSL_PROP_UCHE_GMEM_VADDR failed (%s)", strerror(errno));
       goto fail;
+   }
 
    kgsl_pipe->dev_id.gpu_id = ((info.chip_id >> 24) & 0xff) * 100 +
                               ((info.chip_id >> 16) & 0xff) * 10 +
@@ -241,8 +245,10 @@ kgsl_pipe_new(struct fd_device *dev, enum fd_pipe_id id, unsigned prio)
                KGSL_CONTEXT_PREAMBLE,
    };
 
-   if (kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req))
+   if (kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req)) {
+      ERROR_MSG("DRAWCTXT_CREATE failed (%s)", strerror(errno));
       goto fail;
+   }
 
    kgsl_pipe->queue_id = req.drawctxt_id;
 

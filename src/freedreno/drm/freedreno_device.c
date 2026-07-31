@@ -105,10 +105,17 @@ fd_device_new(int fd)
                close(fd);
                dev_fd = kgsl_fd;
             } else {
+               /* Loud on purpose: this is the last thing standing between
+                * the caller and a screen, and every way it can fail is
+                * otherwise silent.
+                */
+               ERROR_MSG("opened %s but it did not answer "
+                         "KGSL_PROP_DEVICE_INFO: %s",
+                         FD_KGSL_DEVICE_PATH, strerror(errno));
                close(kgsl_fd);
             }
          } else {
-            DEBUG_MSG("cannot open %s: %s", FD_KGSL_DEVICE_PATH,
+            ERROR_MSG("cannot open %s: %s", FD_KGSL_DEVICE_PATH,
                       strerror(errno));
          }
       }
@@ -119,7 +126,8 @@ fd_device_new(int fd)
    }
 
    if (!dev) {
-      INFO_MSG("unsupported device: %s", version ? version->name : "non-drm");
+      WARN_MSG("no freedreno backend claimed this device: %s",
+               version ? version->name : "not a drm device");
       goto out;
    }
 
