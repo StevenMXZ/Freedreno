@@ -337,7 +337,24 @@ dri_make_current(struct dri_context *ctx,
       read->texture_stamp = read->lastStamp - 1;
    }
 
-   st_api_make_current(ctx->st, &draw->base, &read->base);
+   /* Propagate the result, as the configless path above already does.
+    * Dropping it turns a refused bind into a silent one: the caller reports
+    * success and the application only finds out when a later entrypoint hands
+    * it a NULL.
+    */
+   if (!st_api_make_current(ctx->st, &draw->base, &read->base)) {
+      /* Give back what was taken just above.  dri_unbind_context() is what
+       * would normally release these, and it only runs for a context that
+       * became current, so nothing else will come for them.
+       */
+      dri_put_drawable(draw);
+      if (draw != read)
+         dri_put_drawable(read);
+
+      ctx->draw = NULL;
+      ctx->read = NULL;
+      return GL_FALSE;
+   }
 
    return GL_TRUE;
 }
