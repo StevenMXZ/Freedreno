@@ -21,6 +21,9 @@ kgsl_device_destroy(struct fd_device *dev)
 
 static const struct fd_device_funcs funcs = {
    .bo_new = kgsl_bo_new,
+#if DETECT_OS_ANDROID
+   .bo_new_shared_image = kgsl_bo_new_shared_image,
+#endif
    .bo_from_handle = kgsl_bo_from_handle,
    .bo_from_dmabuf = kgsl_bo_from_dmabuf,
    .bo_close_handle = kgsl_bo_close_handle,
@@ -85,6 +88,9 @@ kgsl_device_new(int fd)
    dev->fd = fd;
    dev->version = FD_VERSION_ROBUSTNESS;
    dev->features = FD_FEATURE_DIRECT_RESET | FD_FEATURE_IMPORT_DMABUF;
+#if DETECT_OS_ANDROID
+   dev->features |= FD_FEATURE_SHARED_IMAGE;
+#endif
    dev->bo_size = sizeof(struct kgsl_bo);
 
    kgsl_probe_dma_heap(kgsl_dev);

@@ -70,6 +70,17 @@ struct kgsl_bo {
     */
    int import_fd;
 
+   /* Set when the BO came from kgsl_bo_new_shared_image(): the
+    * AHardwareBuffer whose dma-buf was imported.  Typed void * so the
+    * NDK headers stay out of this one.
+    */
+   void *ahb;
+
+   /* Our end of the socketpair fd_bo_dmabuf() last handed out for an AHB.
+    * Held open because the receiver writes a handshake byte back down it.
+    */
+   int handshake_fd;
+
    enum {
       KGSL_BO_NATIVE,
       KGSL_BO_IMPORT,
@@ -78,6 +89,9 @@ struct kgsl_bo {
 FD_DEFINE_CAST(fd_bo, kgsl_bo);
 
 struct fd_bo *kgsl_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags);
+struct fd_bo *kgsl_bo_new_shared_image(struct fd_device *dev, uint32_t width,
+                                       uint32_t height, uint32_t fourcc,
+                                       uint32_t *pitch);
 struct fd_bo *kgsl_bo_from_handle(struct fd_device *dev, uint32_t size,
                                   uint32_t handle);
 struct fd_bo *kgsl_bo_from_dmabuf(struct fd_device *dev, int fd);

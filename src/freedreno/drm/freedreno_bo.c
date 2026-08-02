@@ -166,6 +166,27 @@ _fd_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
    return bo;
 }
 
+struct fd_bo *
+fd_bo_new_shared_image(struct fd_device *dev, uint32_t width, uint32_t height,
+                       uint32_t fourcc, uint32_t *pitch)
+{
+   if (!dev->funcs->bo_new_shared_image)
+      return NULL;
+
+   struct fd_bo *bo =
+      dev->funcs->bo_new_shared_image(dev, width, height, fourcc, pitch);
+   if (!bo)
+      return NULL;
+
+   /* These are handed to another process, so they can never go back into a
+    * cache to be reused for something else.
+    */
+   bo->bo_reuse = NO_CACHE;
+   bo->alloc_flags |= FD_BO_SHARED;
+
+   return bo;
+}
+
 void
 _fd_bo_set_name(struct fd_bo *bo, const char *fmt, va_list ap)
 {

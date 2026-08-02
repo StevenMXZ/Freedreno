@@ -87,6 +87,13 @@ struct fd_device_funcs {
     */
    struct fd_bo *(*bo_new)(struct fd_device *dev, uint32_t size, uint32_t flags);
 
+   /* Optional; only backends advertising FD_FEATURE_SHARED_IMAGE have it.
+    * See fd_bo_new_shared_image().
+    */
+   struct fd_bo *(*bo_new_shared_image)(struct fd_device *dev, uint32_t width,
+                                        uint32_t height, uint32_t fourcc,
+                                        uint32_t *pitch);
+
    /* Create a new buffer object from existing handle (ie. dma-buf or
     * flink import):
     */

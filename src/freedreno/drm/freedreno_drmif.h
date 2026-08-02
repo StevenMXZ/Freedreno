@@ -194,16 +194,20 @@ enum fd_version fd_device_version(struct fd_device *dev);
 void fd_device_disable_explicit_sync_heuristic(struct fd_device *dev);
 
 /**
- * Optional backend capabilities.  Unlike fd_version, which describes a
- * linear progression of the msm UABI, these are orthogonal opt-ins used
- * where a backend implements something in a fundamentally different way
- * (ie. kgsl, which is not a DRM driver at all).
+ * Optional backend capabilities.  Unlike fd_version, which is a linear
+ * progression of the msm UABI, these are orthogonal opt-ins for backends that
+ * work in a fundamentally different way (ie. kgsl, not a DRM driver at all).
  */
 enum fd_features {
    /* Kernel reports reset status directly, rather than via fault counters */
    FD_FEATURE_DIRECT_RESET = BITSET_BIT(0),
    /* Shared buffers must be allocated externally and imported */
    FD_FEATURE_IMPORT_DMABUF = BITSET_BIT(1),
+   /* Buffers destined for a compositor come from the platform's image
+    * allocator, and fd_bo_dmabuf() hands them over by that platform's
+    * convention rather than as a dma-buf.  See fd_bo_new_shared_image().
+    */
+   FD_FEATURE_SHARED_IMAGE = BITSET_BIT(2),
 };
 
 uint32_t fd_get_features(struct fd_device *dev);
@@ -272,6 +276,19 @@ struct fd_bo {
 
 struct fd_bo *_fd_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags);
 void _fd_bo_set_name(struct fd_bo *bo, const char *fmt, va_list ap);
+
+/**
+ * Allocate an image through the platform's graphics allocator, so it can be
+ * handed to a compositor that will not accept an ordinary GPU buffer.  Takes
+ * geometry rather than a size because the allocator picks the pitch, which it
+ * reports back in *pitch for the caller to lay its resource out around.
+ *
+ * Returns NULL without FD_FEATURE_SHARED_IMAGE, and for a format the allocator
+ * has no equivalent for, so callers must be able to fall back to fd_bo_new().
+ */
+struct fd_bo *fd_bo_new_shared_image(struct fd_device *dev, uint32_t width,
+                                     uint32_t height, uint32_t fourcc,
+                                     uint32_t *pitch);
 
 static inline void fd_bo_set_name(struct fd_bo *bo, const char *fmt, ...)
    _util_printf_format(2, 3);
