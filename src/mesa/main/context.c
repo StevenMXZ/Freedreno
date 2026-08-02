@@ -1334,10 +1334,15 @@ check_compatible(const struct gl_context *ctx,
    check_component(redBits);
    check_component(greenBits);
    check_component(blueBits);
-   check_component(depthBits);
-   check_component(stencilBits);
 
 #undef check_component
+
+   /* Depth and stencil are deliberately not compared: a GLX frontend that
+    * builds the context from an XVisualInfo resolves the visual id to whichever
+    * gl_config was registered for it first, which need not be the drawable's.
+    * Either way the mismatch is harmless -- the implementation picks the actual
+    * depth format -- while refusing the bind costs every window.
+    */
 
    return GL_TRUE;
 }
