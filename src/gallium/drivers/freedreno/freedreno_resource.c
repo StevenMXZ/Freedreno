@@ -1438,6 +1438,35 @@ fd_resource_allocate_and_resolve(struct pipe_screen *pscreen,
    return prsc;
 }
 
+static struct pipe_resource *resource_from_bo(struct pipe_screen *pscreen,
+                                              const struct pipe_resource *tmpl,
+                                              struct fd_bo *bo,
+                                              struct winsys_handle *handle);
+
+/**
+ * The formats the platform image allocator can be asked for.  The other half
+ * of the mapping lives in the drm backend; a format missing from either end
+ * falls back to an ordinary allocation.
+ */
+static uint32_t
+shared_image_fourcc(enum pipe_format format)
+{
+   switch (format) {
+   case PIPE_FORMAT_B8G8R8A8_UNORM:
+      return DRM_FORMAT_ARGB8888;
+   case PIPE_FORMAT_B8G8R8X8_UNORM:
+      return DRM_FORMAT_XRGB8888;
+   case PIPE_FORMAT_R8G8B8A8_UNORM:
+      return DRM_FORMAT_ABGR8888;
+   case PIPE_FORMAT_R8G8B8X8_UNORM:
+      return DRM_FORMAT_XBGR8888;
+   case PIPE_FORMAT_B5G6R5_UNORM:
+      return DRM_FORMAT_RGB565;
+   default:
+      return DRM_FORMAT_INVALID;
+   }
+}
+
 /**
  * Create a new texture object, using the given template info.
  */
@@ -1450,6 +1479,43 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
    struct fd_resource *rsc;
    struct pipe_resource *prsc;
    uint32_t size;
+
+   /* A buffer headed for the display has to come from the platform's image
+    * allocator; a compositor will not accept one we allocated ourselves.  The
+    * allocator picks the pitch, so go through resource_from_bo() to lay the
+    * resource out around it.  Falls through to an ordinary allocation when
+    * there is no such allocator, or none for this format.
+    */
+   if ((tmpl->bind & PIPE_BIND_SCANOUT) &&
+       (fd_get_features(screen->dev) & FD_FEATURE_SHARED_IMAGE)) {
+      uint32_t fourcc = shared_image_fourcc(tmpl->format);
+      uint32_t pitch = 0;
+
+      if (fourcc != DRM_FORMAT_INVALID) {
+         struct fd_bo *bo = fd_bo_new_shared_image(
+            screen->dev, tmpl->width0, tmpl->height0, fourcc, &pitch);
+
+         if (bo) {
+            struct winsys_handle handle = {
+               .type = WINSYS_HANDLE_TYPE_FD,
+               /* Linear and uncompressed: the allocator's pitch *is* the
+                * layout, and nothing outside the GPU can read UBWC.
+                */
+               .modifier = DRM_FORMAT_MOD_LINEAR,
+               .stride = pitch,
+            };
+
+            prsc = resource_from_bo(pscreen, tmpl, bo, &handle);
+            if (prsc)
+               return prsc;
+
+            /* The allocator's pitch was one the layout code would not accept.
+             * Keep going rather than failing the allocation outright: an
+             * ordinary buffer still renders, it just cannot be handed over.
+             */
+         }
+      }
+   }
 
    /* when using kmsro, scanout buffers are allocated on the display device
     * create_with_modifiers() doesn't give us usage flags, so we have to
@@ -1507,20 +1573,21 @@ fd_resource_create(struct pipe_screen *pscreen,
 }
 
 /**
- * Create a texture from a winsys_handle. The handle is often created in
- * another process by first creating a pipe texture and then calling
- * resource_get_handle.
+ * Wrap an existing BO in a resource, laying it out around the pitch, offset
+ * and modifier the handle describes rather than around one of our own
+ * choosing. Takes ownership of the BO, including on failure.
  */
 static struct pipe_resource *
-fd_resource_from_handle(struct pipe_screen *pscreen,
-                        const struct pipe_resource *tmpl,
-                        struct winsys_handle *handle, unsigned usage)
+resource_from_bo(struct pipe_screen *pscreen, const struct pipe_resource *tmpl,
+                 struct fd_bo *bo, struct winsys_handle *handle)
 {
    struct fd_screen *screen = fd_screen(pscreen);
    struct fd_resource *rsc = alloc_resource_struct(pscreen, tmpl);
 
-   if (!rsc)
+   if (!rsc) {
+      fd_bo_del(bo);
       return NULL;
+   }
 
    if (tmpl->target == PIPE_BUFFER)
       tc_buffer_disable_cpu_storage(&rsc->b.b);
@@ -1530,13 +1597,6 @@ fd_resource_from_handle(struct pipe_screen *pscreen,
    DBG("%" PRSC_FMT ", modifier=%" PRIx64, PRSC_ARGS(prsc), handle->modifier);
 
    rsc->b.is_shared = true;
-
-   struct fd_bo *bo = fd_screen_bo_from_handle(pscreen, handle);
-   if (!bo) {
-      if (FD_DBG(LAYOUT))
-         mesa_loge("handle import failed for: %" PRSC_FMT, PRSC_ARGS(tmpl));
-      goto fail;
-   }
 
    fd_resource_set_bo(rsc, bo);
 
@@ -1573,6 +1633,27 @@ fd_resource_from_handle(struct pipe_screen *pscreen,
 fail:
    fd_resource_destroy(pscreen, prsc);
    return NULL;
+}
+
+/**
+ * Create a texture from a winsys_handle. The handle is often created in
+ * another process by first creating a pipe texture and then calling
+ * resource_get_handle.
+ */
+static struct pipe_resource *
+fd_resource_from_handle(struct pipe_screen *pscreen,
+                        const struct pipe_resource *tmpl,
+                        struct winsys_handle *handle, unsigned usage)
+{
+   struct fd_bo *bo = fd_screen_bo_from_handle(pscreen, handle);
+
+   if (!bo) {
+      if (FD_DBG(LAYOUT))
+         mesa_loge("handle import failed for: %" PRSC_FMT, PRSC_ARGS(tmpl));
+      return NULL;
+   }
+
+   return resource_from_bo(pscreen, tmpl, bo, handle);
 }
 
 bool
