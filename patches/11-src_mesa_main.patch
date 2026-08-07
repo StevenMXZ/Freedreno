@@ -1,0 +1,38 @@
+diff --git a/src/mesa/main/context.c b/src/mesa/main/context.c
+index a9907c4209e..1b6992533a6 100644
+--- a/src/mesa/main/context.c
++++ b/src/mesa/main/context.c
+@@ -1334,11 +1334,31 @@ check_compatible(const struct gl_context *ctx,
+    check_component(redBits);
+    check_component(greenBits);
+    check_component(blueBits);
+-   check_component(depthBits);
+-   check_component(stencilBits);
+ 
+ #undef check_component
+ 
++   /* Depth and stencil are deliberately not compared.
++    *
++    * The context's depth and stencil sizes are not trustworthy here.  A GLX
++    * frontend that builds the context from an XVisualInfo rather than from the
++    * fbconfig resolves the visual id to whichever gl_config was registered for
++    * it first, which need not be the one the drawable was made with.  Both
++    * frontends do it, in opposite directions: on the DRI3 path against an X
++    * server exposing a single visual every context lands on the first fbconfig
++    * in the list -- Z24S8 -- while the drawable keeps the Z16 fbconfig the
++    * application asked for; the xlib path takes a depth-less visual for the
++    * context against a Z24S8 drawable.
++    *
++    * Neither direction is a correctness problem.  More bits than the context
++    * asked for is free precision, and fewer is less precision than advertised,
++    * which no program can depend on anyway -- the implementation picks the
++    * actual depth format.  Refusing the bind, by contrast, costs every window
++    * on the DRI3 path.
++    *
++    * Colour shifts and sizes above keep requiring an exact match; those do
++    * change what a program sees.
++    */
++
+    return GL_TRUE;
+ }
+ 

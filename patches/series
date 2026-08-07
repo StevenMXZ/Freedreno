@@ -1,0 +1,12 @@
+01-meson.build.patch
+02-src_util.patch
+03-src_freedreno_drm.patch
+04-src_freedreno_fdl.patch
+05-src_freedreno_ir3.patch
+06-src_gallium_auxiliary_target-helpers.patch
+07-src_gallium_drivers_freedreno.patch
+08-src_gallium_frontends_glx_xlib.patch
+09-src_gallium_targets_libgl-xlib.patch
+10-src_gallium_winsys_sw_xlib.patch
+11-src_mesa_main.patch
+12-src_gallium_frontends_glx_xlib-hud.patch

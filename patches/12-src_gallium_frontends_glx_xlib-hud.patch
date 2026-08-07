@@ -1,0 +1,76 @@
+diff --git a/src/gallium/frontends/glx/xlib/glx_api.c b/src/gallium/frontends/glx/xlib/glx_api.c
+index 42fa20e885c..90537d09c42 100644
+--- a/src/gallium/frontends/glx/xlib/glx_api.c
++++ b/src/gallium/frontends/glx/xlib/glx_api.c
+@@ -36,6 +36,7 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <X11/Xmd.h>
++#include <X11/Xatom.h>
+ #include <GL/glxproto.h>
+ 
+ #include "xm_api.h"
+@@ -1152,6 +1153,45 @@ glXCreateContext( Display *dpy, XVisualInfo *visinfo,
+ }
+ 
+ 
++/**
++ * Advertise the driver on the drawable so the Winlator XServer shows its HUD.
++ * It reveals the overlay for a window that gains a property whose name contains
++ * "_MESA_DRV", and reads _MESA_DRV_ENGINE_NAME and _MESA_DRV_GPU_NAME for the
++ * two strings beside the frame counter -- those three names and no others.
++ *
++ * The GLXDrawable is the window here: glXCreateWindow below hands back the
++ * Window it was given.  That does not hold for the DRI frontend, which is why
++ * src/glx/glxcurrent.c has to resolve the drawable before doing the same thing.
++ */
++static void
++change_string_property(Display *dpy, Window window,
++                       const char *name, const char *value)
++{
++   Atom property = XInternAtom(dpy, name, False);
++
++   XChangeProperty(dpy, window, property, XA_STRING, 8, PropModeReplace,
++                   (const unsigned char *) value, strlen(value));
++}
++
++
++static void
++publish_driver_properties(Display *dpy, GLXDrawable drawable)
++{
++   /* Read from the driver rather than named here: the xlib target still builds
++    * against softpipe/llvmpipe as well, and a literal would have the HUD
++    * reporting the wrong one for whichever build it is not.
++    */
++   const char *vendor = (const char *) glGetString(GL_VENDOR);
++   const char *renderer = (const char *) glGetString(GL_RENDERER);
++
++   change_string_property(dpy, drawable, "_MESA_DRV", "0");
++   if (vendor)
++      change_string_property(dpy, drawable, "_MESA_DRV_ENGINE_NAME", vendor);
++   if (renderer)
++      change_string_property(dpy, drawable, "_MESA_DRV_GPU_NAME", renderer);
++}
++
++
+ /* GLX 1.3 and later */
+ PUBLIC Bool
+ glXMakeContextCurrent( Display *dpy, GLXDrawable draw,
+@@ -1235,7 +1275,16 @@ glXMakeContextCurrent( Display *dpy, GLXDrawable draw,
+ PUBLIC Bool
+ glXMakeCurrent( Display *dpy, GLXDrawable drawable, GLXContext ctx )
+ {
+-   return glXMakeContextCurrent( dpy, drawable, drawable, ctx );
++   Bool result = glXMakeContextCurrent( dpy, drawable, drawable, ctx );
++
++   /* Only touch the drawable once a context is actually bound to it: the
++    * unbind call passes None, and XChangeProperty on it would raise BadWindow,
++    * which Xlib's default error handler turns into an exit().
++    */
++   if (result && ctx && drawable != None)
++      publish_driver_properties(dpy, drawable);
++
++   return result;
+ }
+ 
+ 

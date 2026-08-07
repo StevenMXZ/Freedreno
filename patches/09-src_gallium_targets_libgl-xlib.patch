@@ -1,0 +1,58 @@
+diff --git a/src/gallium/targets/libgl-xlib/meson.build b/src/gallium/targets/libgl-xlib/meson.build
+index 4c953e22a48..0ccf698455f 100644
+--- a/src/gallium/targets/libgl-xlib/meson.build
++++ b/src/gallium/targets/libgl-xlib/meson.build
+@@ -13,6 +13,34 @@ if with_ld_version_script
+   gallium_xlib_link_depends += files('libgl-xlib.sym')
+ endif
+ 
++# Android/bionic (Winlator) build: the xlib winsys presents through MIT-SHM,
++# whose SysV shm* entrypoints bionic declares but does not export.  They are
++# provided by Winlator's libandroid-sysvshm.so, which must therefore land in
++# DT_NEEDED.  libc++_shared is required explicitly because this target links
++# with the C driver while freedreno contributes C++ objects (ir3) via a static
++# library.
++gallium_xlib_extra_link_args = []
++if host_machine.system() == 'android'
++  gallium_xlib_extra_link_args += [
++    '-Wl,--no-as-needed', '-landroid-sysvshm', '-Wl,--as-needed',
++    '-lc++_shared',
++    # src/util/log.c + os_misc.c call __android_log_write under __ANDROID__.
++    '-llog',
++    # freedreno reaches sync_merge()/sync_file_info() through src/util/libsync.h,
++    # which on Android takes them from <android/sync.h> rather than from its
++    # inlined ioctl fallback; the NDK ships libsync.so and both are
++    # __INTRODUCED_IN(26).
++    '-lsync',
++    # Android API < 29 has no ELF TLS in bionic, so clang lowers __thread via
++    # emulated TLS: _mesa_glapi_tls_Dispatch exists only as __emutls_v.<name>.
++    # The version script names it explicitly, and lld >= 17 makes an
++    # unresolvable exact name a hard error.  Nothing outside libGL needs that
++    # symbol (glapi is linked into libGL itself, and glvnd is disabled), so
++    # allow the assignment to go unmatched instead.
++    '-Wl,--undefined-version',
++  ]
++endif
++
+ libgl = shared_library(
+   'GL',
+   files('xlib.c'),
+@@ -21,11 +49,16 @@ libgl = shared_library(
+     include_directories('../../frontends/glx/xlib'),
+   ],
+   gnu_symbol_visibility : 'hidden',
+-  link_args : [ld_args_bsymbolic, ld_args_gc_sections, gallium_xlib_ld_args],
++  link_args : [ld_args_bsymbolic, ld_args_gc_sections, gallium_xlib_ld_args,
++               gallium_xlib_extra_link_args],
+   link_depends : gallium_xlib_link_depends,
+   link_whole : [libxlib, libglapi_bridge],
+   link_with : [libgalliumvl_stub, libws_xlib, libglapi, libgallium, libmesa],
+-  dependencies : [dep_x11, idep_mesautil, dep_thread, dep_clock, dep_unwind, driver_swrast, driver_virgl, driver_asahi],
++  # idep_xmlconfig: freedreno_screen.c calls driParseConfigFiles()/driQueryOptionf(),
++  # which softpipe/llvmpipe never did, so the stock xlib target did not link it.
++  # With xmlconfig=disabled these are still built (WITH_XMLCONFIG=0) as the
++  # hardcoded-driconf variant, and pull in no expat dependency.
++  dependencies : [dep_x11, idep_mesautil, dep_thread, dep_clock, dep_unwind, driver_swrast, driver_virgl, driver_asahi, driver_freedreno, idep_xmlconfig],
+   install : true,
+   version : '1.5.0',
+   darwin_versions: '4.0.0',
