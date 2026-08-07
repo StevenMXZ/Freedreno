@@ -17,6 +17,20 @@ while read p; do git apply "patches/$p"; done < patches/series
 
 ## Build
 
+O caminho completo (NDK, sysroot Termux, `libandroid-sysvshm`, cross file,
+patches, compilação, empacotamento e verificação) está em `patches/build.sh`,
+que é o mesmo script que o workflow do GitHub Actions executa:
+
+```bash
+patches/build.sh all
+```
+
+Sai `opengl_freedreno.tzst` na raiz da árvore. `patches/build.sh deps` instala
+só as ferramentas de host (precisa de apt/sudo) e `patches/build.sh build` faz o
+resto sem root.
+
+Configuração manual equivalente:
+
 ```bash
 meson setup build --cross-file cross-android-aarch64.ini --buildtype release -Db_ndebug=true -Dgallium-drivers=freedreno -Dvulkan-drivers= -Dfreedreno-kmds=kgsl -Dglx=xlib -Dplatforms=x11 -Dxlib-lease=disabled -Degl=disabled -Dgbm=disabled -Dgles1=disabled -Dgles2=disabled -Dopengl=true -Dglvnd=disabled -Dllvm=disabled -Dxmlconfig=disabled -Dzstd=enabled -Dlibunwind=disabled -Dvalgrind=disabled -Dbuild-tests=false -Dandroid-libbacktrace=disabled -Dvideo-codecs=
 ```
