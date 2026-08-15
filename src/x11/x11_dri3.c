@@ -30,7 +30,44 @@
 #include <xcb/xcb.h>
 #include <xcb/dri3.h>
 #include <xcb/present.h>
-#include <xcb/xfixes.h>
+
+#include "util/log.h"
+#include "util/os_misc.h"
+
+/** x11_dri3_no_device_fd
+ *
+ * Answer for a server that implements DRI3 but has no DRM device to hand out.
+ * Winlator's X server is one: it shares pixmaps and presents them, but its
+ * Open reply carries no fd at all.
+ *
+ * The fd only names the device the driver will run on, so its absence is not
+ * fatal as long as the driver can find that device itself. A pinned
+ * MESA_LOADER_DRIVER_OVERRIDE is that promise, and is why this is gated on one:
+ * without it loader_get_driver_for_fd() would probe the placeholder and report
+ * "No driver found" instead of the caller's clearer diagnostic.
+ *
+ * /dev/null serves: the fd only has to survive being dup'ed and passed down.
+ * loader_get_pci_id_for_fd() and drmGetVersion() both fail on it, landing on
+ * PIPE_LOADER_DEVICE_PLATFORM.
+ */
+static int
+x11_dri3_no_device_fd(void)
+{
+   const char *driver = os_get_option("MESA_LOADER_DRIVER_OVERRIDE");
+   int fd;
+
+   if (!driver || !*driver)
+      return -1;
+
+   fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+   if (fd < 0)
+      return -1;
+
+   mesa_logi("DRI3 Open returned no device fd; running %s against a "
+             "placeholder, the driver has to find its device itself", driver);
+
+   return fd;
+}
 
 /** x11_dri3_open
  *
@@ -43,8 +80,6 @@ x11_dri3_open(xcb_connection_t *conn,
 {
    xcb_dri3_open_cookie_t       cookie;
    xcb_dri3_open_reply_t        *reply;
-   xcb_xfixes_query_version_cookie_t fixes_cookie;
-   xcb_xfixes_query_version_reply_t *fixes_reply;
    int                          fd;
    const xcb_query_extension_reply_t *extension;
 
@@ -59,25 +94,23 @@ x11_dri3_open(xcb_connection_t *conn,
 
    reply = xcb_dri3_open_reply(conn, cookie, NULL);
 
-   if (!reply || reply->nfd != 1) {
-      free(reply);
+   if (!reply)
       return -1;
+
+   if (reply->nfd != 1) {
+      free(reply);
+      return x11_dri3_no_device_fd();
    }
 
    fd = xcb_dri3_open_reply_fds(conn, reply)[0];
    free(reply);
    fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
 
-   /* let the server know our xfixes level */
-   fixes_cookie = xcb_xfixes_query_version(conn,
-                                           XCB_XFIXES_MAJOR_VERSION,
-                                           XCB_XFIXES_MINOR_VERSION);
-   fixes_reply = xcb_xfixes_query_version_reply(conn, fixes_cookie, NULL);
-   if (fixes_reply->major_version < 2) {
-      close(fd);
-      fd = -1;
-   }
-   free(fixes_reply);
+   /* The loader only ever used XFixes to hand Present a damage region, and it
+    * no longer builds one: an update region of None covers the whole window.
+    * So there is nothing left to negotiate an XFixes version for, and a server
+    * without the extension is no longer a reason to refuse DRI3.
+    */
 
    return fd;
 }

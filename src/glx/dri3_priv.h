@@ -57,7 +57,6 @@
 #include <xcb/xcb.h>
 #include <xcb/dri3.h>
 #include <xcb/present.h>
-#include <xcb/sync.h>
 
 #include "loader_dri3_helper.h"
 #include "mesa_interface.h"

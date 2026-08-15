@@ -26,11 +26,9 @@
 #include <unistd.h>
 #include <string.h>
 
-#include <X11/xshmfence.h>
 #include <xcb/xcb.h>
 #include <xcb/dri3.h>
 #include <xcb/present.h>
-#include <xcb/xfixes.h>
 
 #include <X11/Xlib-xcb.h>
 
@@ -64,6 +62,10 @@ dri3_flush_present_events(struct loader_dri3_drawable *draw);
 
 static struct loader_dri3_buffer *
 dri3_find_back_alloc(struct loader_dri3_drawable *draw);
+
+static bool
+dri3_wait_for_event_locked(struct loader_dri3_drawable *draw,
+                           unsigned *full_sequence);
 
 static xcb_screen_t *
 get_screen_for_root(xcb_connection_t *conn, xcb_window_t root)
@@ -244,35 +246,58 @@ loader_dri3_blit_image(struct loader_dri3_drawable *draw,
    return dri_context != NULL;
 }
 
+/* Without DRI3 FenceFromFD there is no fence to reset, trigger or hand to the
+ * server, so the three producer-side calls collapse to nothing.
+ */
 static inline void
-dri3_fence_reset(xcb_connection_t *c, struct loader_dri3_buffer *buffer)
+dri3_fence_reset(UNUSED xcb_connection_t *c,
+                 UNUSED struct loader_dri3_buffer *buffer)
 {
-   xshmfence_reset(buffer->shm_fence);
 }
 
 static inline void
-dri3_fence_set(struct loader_dri3_buffer *buffer)
+dri3_fence_set(UNUSED struct loader_dri3_buffer *buffer)
 {
-   xshmfence_trigger(buffer->shm_fence);
 }
 
 static inline void
-dri3_fence_trigger(xcb_connection_t *c, struct loader_dri3_buffer *buffer)
+dri3_fence_trigger(UNUSED xcb_connection_t *c,
+                   UNUSED struct loader_dri3_buffer *buffer)
 {
-   xcb_sync_trigger_fence(c, buffer->sync_fence);
 }
 
-static inline void
+/* The fence answered two questions, and each needs its own answer now:
+ *
+ *  - "is the server done with the CopyArea I asked for?" Requests execute in
+ *    order, so a reply to any later request proves it. Hence the round-trip.
+ *
+ *  - "has the server let go of a buffer I presented?" Only PresentIdleNotify
+ *    says so, and that already clears buffer->busy.
+ *
+ * More conservative than the fence it replaces, which was rearmed around each
+ * CopyArea and so did not also wait for the pixmap to go idle. That can cost a
+ * frame in loader_dri3_copy_sub_buffer(), not on the glXSwapBuffers path.
+ */
+static void
 dri3_fence_await(xcb_connection_t *c, struct loader_dri3_drawable *draw,
                  struct loader_dri3_buffer *buffer)
 {
-   xcb_flush(c);
-   xshmfence_await(buffer->shm_fence);
-   if (draw) {
-      mtx_lock(&draw->mtx);
-      dri3_flush_present_events(draw);
-      mtx_unlock(&draw->mtx);
+   free(xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL));
+
+   if (!draw)
+      return;
+
+   mtx_lock(&draw->mtx);
+   dri3_flush_present_events(draw);
+
+   /* Pbuffers and pixmaps never go through Present, so they have no event
+    * stream to wait on and never set busy in the first place.
+    */
+   while (buffer->busy && draw->special_event) {
+      if (!dri3_wait_for_event_locked(draw, NULL))
+         break;
    }
+   mtx_unlock(&draw->mtx);
 }
 
 static void
@@ -343,8 +368,6 @@ dri3_free_render_buffer(struct loader_dri3_drawable *draw,
 
    if (buffer->own_pixmap)
       xcb_free_pixmap(draw->conn, buffer->pixmap);
-   xcb_sync_destroy_fence(draw->conn, buffer->sync_fence);
-   xshmfence_unmap_shm(buffer->shm_fence);
    dri2_destroy_image(buffer->image);
    if (buffer->linear_buffer)
       dri2_destroy_image(buffer->linear_buffer);
@@ -375,9 +398,6 @@ loader_dri3_drawable_fini(struct loader_dri3_drawable *draw)
       xcb_unregister_for_special_event(draw->conn, draw->special_event);
    }
 
-   if (draw->region)
-      xcb_xfixes_destroy_region(draw->conn, draw->region);
-
    cnd_destroy(&draw->event_cnd);
    mtx_destroy(&draw->mtx);
 }
@@ -402,7 +422,6 @@ loader_dri3_drawable_init(xcb_connection_t *conn,
    draw->vtable = vtable;
    draw->drawable = drawable;
    draw->type = type;
-   draw->region = 0;
    draw->dri_screen_render_gpu = dri_screen_render_gpu;
    draw->dri_screen_display_gpu = dri_screen_display_gpu;
    draw->multiplanes_available = multiplanes_available;
@@ -1168,26 +1187,12 @@ loader_dri3_swap_buffers_msc(struct loader_dri3_drawable *draw,
       back->busy = 1;
       back->last_swap = draw->send_sbc;
 
-      if (!draw->region) {
-         draw->region = xcb_generate_id(draw->conn);
-         xcb_xfixes_create_region(draw->conn, draw->region, 0, NULL);
-      }
-
-      xcb_xfixes_region_t region = 0;
-      xcb_rectangle_t xcb_rects[64];
-
-      if (n_rects > 0 && n_rects <= ARRAY_SIZE(xcb_rects)) {
-         for (int i = 0; i < n_rects; i++) {
-            const int *rect = &rects[i * 4];
-            xcb_rects[i].x = rect[0];
-            xcb_rects[i].y = draw->height - rect[1] - rect[3];
-            xcb_rects[i].width = rect[2];
-            xcb_rects[i].height = rect[3];
-         }
-
-         region = draw->region;
-         xcb_xfixes_set_region(draw->conn, region, n_rects, xcb_rects);
-      }
+      /* None means "the whole window": correct, if pessimistic. Without XFixes
+       * there is no way to name a smaller region, so a damage region from
+       * EGL_KHR_swap_buffers_with_damage degrades to a full update. GLX has no
+       * damage regions and always arrives with n_rects == 0.
+       */
+      uint32_t region = 0;
 
       xcb_present_pixmap(draw->conn,
                          draw->drawable,
@@ -1198,8 +1203,13 @@ loader_dri3_swap_buffers_msc(struct loader_dri3_drawable *draw,
                          0,                                    /* x_off */
                          0,                                    /* y_off */
                          None,                                 /* target_crtc */
-                         None,
-                         back->sync_fence,
+                         None,                                 /* wait_fence */
+                         /* The idle fence is optional in the Present protocol.
+                          * Without one the server reports the pixmap idle with
+                          * a PresentIdleNotify event only, which is what
+                          * dri3_handle_present_event() acts on anyway.
+                          */
+                         None,                                 /* idle_fence */
                          options,
                          target_msc,
                          divisor,
@@ -1409,8 +1419,6 @@ has_supported_modifier(struct loader_dri3_drawable *draw, unsigned int format,
  *
  * Use the driver createImage function to construct a struct dri_image, then
  * get a file descriptor for that and create an X pixmap from that
- *
- * Allocate an xshmfence for synchronization
  */
 static struct loader_dri3_buffer *
 dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
@@ -1420,26 +1428,12 @@ dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
    struct dri_image *pixmap_buffer = NULL, *linear_buffer_display_gpu = NULL;
    enum pipe_format format = loader_fourcc_to_pipe_format(fourcc);
    xcb_pixmap_t pixmap;
-   xcb_sync_fence_t sync_fence;
-   struct xshmfence *shm_fence;
-   int buffer_fds[4], fence_fd;
+   int buffer_fds[4];
    int num_planes = 0;
    uint64_t *modifiers = NULL;
    uint32_t count = 0;
    int i, mod;
    int ret;
-
-   /* Create an xshmfence object and
-    * prepare to send that to the X server
-    */
-
-   fence_fd = xshmfence_alloc_shm();
-   if (fence_fd < 0)
-      return NULL;
-
-   shm_fence = xshmfence_map_shm(fence_fd);
-   if (shm_fence == NULL)
-      goto no_shm_fence;
 
    /* Allocate the image from the driver
     */
@@ -1624,7 +1618,7 @@ dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
 
    pixmap = xcb_generate_id(draw->conn);
 
-   xcb_void_cookie_t cookie_pix, cookie_fence;
+   xcb_void_cookie_t cookie_pix;
    if (draw->multiplanes_available &&
        buffer->modifier != DRM_FORMAT_MOD_INVALID) {
       cookie_pix = xcb_dri3_pixmap_from_buffers_checked(draw->conn,
@@ -1648,21 +1642,11 @@ dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
                                                        depth, buffer->cpp * 8,
                                                        buffer_fds[0]);
    }
-   cookie_fence = xcb_dri3_fence_from_fd_checked(draw->conn,
-                                                 pixmap,
-                                                 (sync_fence = xcb_generate_id(draw->conn)),
-                                                 false,
-                                                 fence_fd);
-   /* Group error checking to limit round-trips. */
    if (!check_xcb_error(cookie_pix, "xcb_dri3_pixmap_from_buffer[s]"))
-      goto no_buffer_attrib;
-   if (!check_xcb_error(cookie_fence, "xcb_dri3_fence_from_fd"))
       goto no_buffer_attrib;
 
    buffer->pixmap = pixmap;
    buffer->own_pixmap = true;
-   buffer->sync_fence = sync_fence;
-   buffer->shm_fence = shm_fence;
    buffer->width = width;
    buffer->height = height;
 
@@ -1684,9 +1668,6 @@ no_linear_buffer:
 no_image:
    free(buffer);
 no_buffer:
-   xshmfence_unmap_shm(shm_fence);
-no_shm_fence:
-   close(fence_fd);
    return NULL;
 }
 
@@ -1950,12 +1931,8 @@ dri3_get_pixmap_buffer(struct dri_drawable *driDrawable, unsigned int fourcc,
    int                                  buf_id = loader_dri3_pixmap_buf_id(buffer_type);
    struct loader_dri3_buffer            *buffer = draw->buffers[buf_id];
    xcb_drawable_t                       pixmap;
-   xcb_void_cookie_t                    cookie;
-   xcb_sync_fence_t                     sync_fence;
-   struct xshmfence                     *shm_fence;
    int                                  width;
    int                                  height;
-   int                                  fence_fd;
    struct dri_screen                          *cur_screen;
 
    if (buffer)
@@ -1967,15 +1944,6 @@ dri3_get_pixmap_buffer(struct dri_drawable *driDrawable, unsigned int fourcc,
    if (!buffer)
       goto no_buffer;
 
-   fence_fd = xshmfence_alloc_shm();
-   if (fence_fd < 0)
-      goto no_fence;
-   shm_fence = xshmfence_map_shm(fence_fd);
-   if (shm_fence == NULL) {
-      close (fence_fd);
-      goto no_fence;
-   }
-
    /* Get the currently-bound screen or revert to using the drawable's screen if
     * no contexts are currently bound. The latter case is at least necessary for
     * obs-studio, when using Window Capture (Xcomposite) as a Source.
@@ -1984,14 +1952,6 @@ dri3_get_pixmap_buffer(struct dri_drawable *driDrawable, unsigned int fourcc,
    if (!cur_screen) {
        cur_screen = draw->dri_screen_render_gpu;
    }
-
-   cookie = xcb_dri3_fence_from_fd_checked(draw->conn,
-                                           pixmap,
-                                           (sync_fence = xcb_generate_id(draw->conn)),
-                                           false,
-                                           fence_fd);
-   if (!check_xcb_error(cookie, "xcb_dri3_fence_from_fd"))
-      goto no_image;
 
    buffer->image = loader_dri3_get_pixmap_buffer(draw->conn, pixmap, cur_screen, fourcc,
                                                  draw->multiplanes_available, &width, &height, buffer);
@@ -2003,17 +1963,12 @@ dri3_get_pixmap_buffer(struct dri_drawable *driDrawable, unsigned int fourcc,
    buffer->own_pixmap = false;
    buffer->width = width;
    buffer->height = height;
-   buffer->shm_fence = shm_fence;
-   buffer->sync_fence = sync_fence;
 
    dri3_set_render_buffer(draw, buf_id, buffer);
 
    return buffer;
 
 no_image:
-   xcb_sync_destroy_fence(draw->conn, sync_fence);
-   xshmfence_unmap_shm(shm_fence);
-no_fence:
    free(buffer);
 no_buffer:
    return NULL;

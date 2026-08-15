@@ -52,20 +52,13 @@ struct loader_dri3_buffer {
     */
    struct dri_image   *linear_buffer;
 
-   /* Synchronization between the client and X server is done using an
-    * xshmfence that is mapped into an X server SyncFence. This lets the
-    * client check whether the X server is done using a buffer with a simple
-    * xshmfence call, rather than going to read X events from the wire.
-    *
-    * However, we can only wait for one xshmfence to be triggered at a time,
-    * so we need to know *which* buffer is going to be idle next. We do that
-    * by waiting for a PresentIdleNotify event. When that event arrives, the
-    * 'busy' flag gets cleared and the client knows that the fence has been
-    * triggered, and that the wait call will not block.
+   /* Synchronization between the client and the X server rides entirely on
+    * Present: 'busy' and the PresentIdleNotify event that clears it are the
+    * only thing tracking whether the server still holds a presented buffer,
+    * and anything the X SyncFence used to guard on the CopyArea paths is
+    * guarded by a round-trip instead. See dri3_fence_await().
     */
 
-   uint32_t     sync_fence;     /* XID of X SyncFence object */
-   struct xshmfence *shm_fence; /* pointer to xshmfence object */
    bool         busy;           /* Set on swap, cleared on IdleNotify */
    bool         own_pixmap;     /* We allocated the pixmap ID, free on destroy */
    bool         reallocate;     /* Buffer should be reallocated and not reused */
@@ -119,7 +112,6 @@ struct loader_dri3_drawable {
    struct dri_drawable *dri_drawable;
    xcb_drawable_t drawable;
    xcb_window_t window;
-   xcb_xfixes_region_t region;
    int width;
    int height;
    int depth;
