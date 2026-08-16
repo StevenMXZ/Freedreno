@@ -11,6 +11,7 @@
  */
 
 #include <pthread.h>
+#include <X11/Xatom.h>
 
 #include "glxclient.h"
 #include "glapi.h"
@@ -181,10 +182,78 @@ MakeContextCurrent(Display * dpy, GLXDrawable draw,
    return ret;
 }
 
+/**
+ * Advertise the driver on the drawable's window, which is how the Winlator
+ * XServer is told to show its HUD: it reveals the overlay for the window that
+ * gains a property whose name contains "_MESA_DRV", and reads
+ * _MESA_DRV_ENGINE_NAME and _MESA_DRV_GPU_NAME for the two strings beside the
+ * frame counter.  Without them the HUD never appears at all.
+ *
+ * The strings come from GLX_MESA_query_renderer rather than glGetString():
+ * query_renderer.c is part of this library and asks the screen directly, while
+ * the GL entrypoints are dispatch stubs whose resolution depends on how glapi
+ * was linked.
+ *
+ * The property goes on the X window, not on the GLXDrawable -- this path
+ * allocates a distinct GLXWindow XID, and XChangeProperty against that is a
+ * BadWindow.
+ */
+static void
+publish_driver_properties(Display *dpy, GLXDrawable drawable)
+{
+   /* Atoms are server-wide, so a name interns to the same value on every
+    * connection and can be cached across displays.  XInternAtom is a round
+    * trip and this runs per bind.
+    */
+   static Atom drv, engine_name, gpu_name;
+   __GLXDRIdrawable *pdraw = GetGLXDRIDrawable(dpy, drawable);
+   Window window = pdraw ? pdraw->xDrawable : (Window) drawable;
+   const char *engine =
+      glXQueryCurrentRendererStringMESA(GLX_RENDERER_VENDOR_ID_MESA);
+   const char *gpu =
+      glXQueryCurrentRendererStringMESA(GLX_RENDERER_DEVICE_ID_MESA);
+
+   if (drv == None) {
+      drv = XInternAtom(dpy, "_MESA_DRV", False);
+      engine_name = XInternAtom(dpy, "_MESA_DRV_ENGINE_NAME", False);
+      gpu_name = XInternAtom(dpy, "_MESA_DRV_GPU_NAME", False);
+   }
+
+#define SET_PROPERTY(atom, value)                                       \
+   XChangeProperty(dpy, window, atom, XA_STRING, 8, PropModeReplace,    \
+                   (const unsigned char *) (value), strlen(value))
+
+   /* The trigger keys off the name alone, so the value carries nothing. */
+   SET_PROPERTY(drv, "0");
+
+   if (engine)
+      SET_PROPERTY(engine_name, engine);
+   if (gpu)
+      SET_PROPERTY(gpu_name, gpu);
+
+#undef SET_PROPERTY
+}
+
 _GLX_PUBLIC Bool
 glXMakeCurrent(Display * dpy, GLXDrawable draw, GLXContext gc)
 {
-   return MakeContextCurrent(dpy, draw, draw, gc, X_GLXMakeCurrent);
+   Bool ret = MakeContextCurrent(dpy, draw, draw, gc, X_GLXMakeCurrent);
+
+   /* Only once a context is really bound: unbinding passes None for both, and
+    * the renderer strings have nothing to answer from without a current
+    * context.  Repeating it on every bind would be three X requests for an
+    * unchanged answer, and wined3d rebinds often, so remember the last one.
+    */
+   if (ret && gc != NULL && draw != None) {
+      static __thread GLXDrawable published = None;
+
+      if (published != draw) {
+         published = draw;
+         publish_driver_properties(dpy, draw);
+      }
+   }
+
+   return ret;
 }
 
 _GLX_PUBLIC Bool
