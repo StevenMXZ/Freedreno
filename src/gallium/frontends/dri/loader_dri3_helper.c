@@ -635,13 +635,26 @@ loader_dri3_wait_for_msc(struct loader_dri3_drawable *draw,
                          int64_t divisor, int64_t remainder,
                          int64_t *ust, int64_t *msc, int64_t *sbc)
 {
-   xcb_void_cookie_t cookie = xcb_present_notify_msc(draw->conn,
-                                                     draw->drawable,
-                                                     draw->eid,
-                                                     target_msc,
-                                                     divisor,
-                                                     remainder);
+   xcb_void_cookie_t cookie = xcb_present_notify_msc_checked(draw->conn,
+                                                             draw->drawable,
+                                                             draw->eid,
+                                                             target_msc,
+                                                             divisor,
+                                                             remainder);
+   xcb_generic_error_t *error;
    unsigned full_sequence;
+
+   /* NotifyMSC is the one Present request a minimal server is likely to be
+    * missing, and the wait below has no timeout: without the check a server
+    * that rejects it would leave the caller blocked on an event that is never
+    * coming. Check costs a round-trip, but this call is already a blocking
+    * wait for a future frame.
+    */
+   error = xcb_request_check(draw->conn, cookie);
+   if (error) {
+      free(error);
+      return false;
+   }
 
    mtx_lock(&draw->mtx);
 
@@ -1457,42 +1470,57 @@ dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
          mod_reply = xcb_dri3_get_supported_modifiers_reply(draw->conn,
                                                             mod_cookie,
                                                             &error);
-         if (!mod_reply)
-            goto no_image;
+         /* A server can announce DRI3 1.2 for PixmapFromBuffers alone and still
+          * reject GetSupportedModifiers, which is what Winlator's server does.
+          * The request only ever asks what the server would prefer, so treat a
+          * refusal as "no preference" and let the driver pick, rather than
+          * failing the buffer allocation and leaving the drawable blank.
+          */
+         if (!mod_reply) {
+            static bool warned = false;
 
-         if (mod_reply->num_window_modifiers) {
-            count = mod_reply->num_window_modifiers;
-            modifiers = malloc(count * sizeof(uint64_t));
-            if (!modifiers) {
-               free(mod_reply);
-               goto no_image;
+            if (!warned) {
+               warned = true;
+               mesa_logi("DRI3 GetSupportedModifiers failed (error %d); "
+                         "allocating without a server modifier list",
+                         error ? error->error_code : 0);
+            }
+            free(error);
+         } else {
+            if (mod_reply->num_window_modifiers) {
+               count = mod_reply->num_window_modifiers;
+               modifiers = malloc(count * sizeof(uint64_t));
+               if (!modifiers) {
+                  free(mod_reply);
+                  goto no_image;
+               }
+
+               memcpy(modifiers,
+                      xcb_dri3_get_supported_modifiers_window_modifiers(mod_reply),
+                      count * sizeof(uint64_t));
+
+               if (!has_supported_modifier(draw, fourcc, modifiers, count)) {
+                  free(modifiers);
+                  count = 0;
+                  modifiers = NULL;
+               }
             }
 
-            memcpy(modifiers,
-                   xcb_dri3_get_supported_modifiers_window_modifiers(mod_reply),
-                   count * sizeof(uint64_t));
+            if (mod_reply->num_screen_modifiers && modifiers == NULL) {
+               count = mod_reply->num_screen_modifiers;
+               modifiers = malloc(count * sizeof(uint64_t));
+               if (!modifiers) {
+                  free(mod_reply);
+                  goto no_image;
+               }
 
-            if (!has_supported_modifier(draw, fourcc, modifiers, count)) {
-               free(modifiers);
-               count = 0;
-               modifiers = NULL;
+               memcpy(modifiers,
+                      xcb_dri3_get_supported_modifiers_screen_modifiers(mod_reply),
+                      count * sizeof(uint64_t));
             }
+
+            free(mod_reply);
          }
-
-         if (mod_reply->num_screen_modifiers && modifiers == NULL) {
-            count = mod_reply->num_screen_modifiers;
-            modifiers = malloc(count * sizeof(uint64_t));
-            if (!modifiers) {
-               free(mod_reply);
-               goto no_image;
-            }
-
-            memcpy(modifiers,
-                   xcb_dri3_get_supported_modifiers_screen_modifiers(mod_reply),
-                   count * sizeof(uint64_t));
-         }
-
-         free(mod_reply);
       }
       buffer->image = dri_create_image_with_modifiers(draw->dri_screen_render_gpu,
                                               width, height, format,
@@ -1886,6 +1914,9 @@ loader_dri3_get_pixmap_buffer(xcb_connection_t *conn, xcb_drawable_t pixmap, str
                               int *width, int *height, void *loader_data)
 {
    struct dri_image *image;
+   xcb_dri3_buffer_from_pixmap_cookie_t bp_cookie;
+   xcb_dri3_buffer_from_pixmap_reply_t *bp_reply;
+
    if (multiplanes_available) {
       xcb_dri3_buffers_from_pixmap_cookie_t bps_cookie;
       xcb_dri3_buffers_from_pixmap_reply_t *bps_reply;
@@ -1893,28 +1924,32 @@ loader_dri3_get_pixmap_buffer(xcb_connection_t *conn, xcb_drawable_t pixmap, str
       bps_cookie = xcb_dri3_buffers_from_pixmap(conn, pixmap);
       bps_reply = xcb_dri3_buffers_from_pixmap_reply(conn, bps_cookie,
                                                      NULL);
-      if (!bps_reply)
-         return NULL;
-      image = loader_dri3_create_image_from_buffers(conn, bps_reply, fourcc,
-                                                    screen, loader_data);
-      *width = bps_reply->width;
-      *height = bps_reply->height;
-      free(bps_reply);
-   } else {
-      xcb_dri3_buffer_from_pixmap_cookie_t bp_cookie;
-      xcb_dri3_buffer_from_pixmap_reply_t *bp_reply;
-
-      bp_cookie = xcb_dri3_buffer_from_pixmap(conn, pixmap);
-      bp_reply = xcb_dri3_buffer_from_pixmap_reply(conn, bp_cookie, NULL);
-      if (!bp_reply)
-         return NULL;
-
-      image = loader_dri3_create_image(conn, bp_reply, fourcc, screen,
-                                               loader_data);
-      *width = bp_reply->width;
-      *height = bp_reply->height;
-      free(bp_reply);
+      /* Same story as GetSupportedModifiers: a server can announce DRI3 1.2
+       * without implementing BuffersFromPixmap. The single-plane request from
+       * DRI3 1.0 describes the same pixmap, so fall through to it instead of
+       * giving up on the drawable.
+       */
+      if (bps_reply) {
+         image = loader_dri3_create_image_from_buffers(conn, bps_reply, fourcc,
+                                                       screen, loader_data);
+         *width = bps_reply->width;
+         *height = bps_reply->height;
+         free(bps_reply);
+         return image;
+      }
    }
+
+   bp_cookie = xcb_dri3_buffer_from_pixmap(conn, pixmap);
+   bp_reply = xcb_dri3_buffer_from_pixmap_reply(conn, bp_cookie, NULL);
+   if (!bp_reply)
+      return NULL;
+
+   image = loader_dri3_create_image(conn, bp_reply, fourcc, screen,
+                                            loader_data);
+   *width = bp_reply->width;
+   *height = bp_reply->height;
+   free(bp_reply);
+
    return image;
 }
 
