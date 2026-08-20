@@ -7,7 +7,7 @@
  * the above copyright notice appear in all copies and that both that copyright
  * notice and this permission notice appear in supporting documentation, and
  * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
+ * publicity pertaining to distribution without specific,
  * written prior permission.  The copyright holders make no representations
  * about the suitability of this software for any purpose.  It is provided "as
  * is" without express or implied warranty.
@@ -206,17 +206,12 @@ loader_dri3_blit_context_put(void)
 /**
  * Blit (parts of) the contents of a DRI image to another dri image
  *
- * \param draw[in]  The drawable which owns the images.
- * \param dst[in]  The destination image.
- * \param src[in]  The source image.
- * \param dstx0[in]  Start destination coordinate.
- * \param dsty0[in]  Start destination coordinate.
- * \param width[in]  Blit width.
- * \param height[in] Blit height.
- * \param srcx0[in]  Start source coordinate.
- * \param srcy0[in]  Start source coordinate.
- * \param flush_flag[in]  Image blit flush flag.
- * \return true iff successful.
+ * \param draw[in]  Pointer to the drawable whose dri screen we want a
+ * dri context for.
+ * \return A dri context or NULL if context creation failed.
+ *
+ * When the caller is done with the context (even if the context returned was
+ * NULL), the caller must call loader_dri3_blit_context_put.
  */
 static bool
 loader_dri3_blit_image(struct loader_dri3_drawable *draw,
@@ -2020,7 +2015,15 @@ dri3_get_buffer(struct dri_drawable *driDrawable,
                 struct loader_dri3_drawable *draw)
 {
    struct loader_dri3_buffer *buffer;
-   bool fence_await = buffer_type == loader_dri3_buffer_back;
+   /* dri3_find_back() already returns an idle backbuffer (and waits for
+    * PresentIdleNotify if necessary).  Starting with fence_await=true here
+    * therefore adds no correctness for normal backbuffer reuse; without X
+    * SyncFences it only forces a synchronous GetInputFocus round-trip on every
+    * frame.  Keep it false by default.  The paths below that actually queue a
+    * server-side CopyArea explicitly set it back to true before the image is
+    * consumed.
+    */
+   bool fence_await = false;
    int buf_id;
 
    if (buffer_type == loader_dri3_buffer_back) {
