@@ -10,6 +10,7 @@
 #include "util/format/u_format_rgtc.h"
 #include "util/format/u_format_zs.h"
 #include "util/set.h"
+#include "util/u_call_once.h"
 #include "util/u_drm.h"
 #include "util/u_inlines.h"
 #include "util/u_resource.h"
@@ -30,6 +31,7 @@
 #include "freedreno_util.h"
 
 #include <errno.h>
+#include <strings.h>
 #include "drm-uapi/drm_fourcc.h"
 
 /* XXX this should go away, needed for 'struct winsys_handle' */
@@ -689,6 +691,51 @@ fd_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
    struct fd_context *ctx = fd_context(pctx);
    struct fd_resource *rsc = fd_resource(prsc);
 
+   /* The shared buffer is in a different channel order than the one rendering
+    * went to, so the pixels have to be converted rather than just handed
+    * over.  A blit is what converts: it reads the source as the source's
+    * format and writes the destination as the destination's, so red stays
+    * red across the swap.  A copy would move the bytes over untouched and
+    * arrive with red and blue exchanged.
+    *
+    * This runs before the implicit-sync check below, since the caller is
+    * about to hand the mirror out either way.
+    */
+   if (rsc->shared_mirror) {
+      struct pipe_blit_info blit = {0};
+
+      blit.src.resource = prsc;
+      blit.src.format = prsc->format;
+      blit.src.box.width = prsc->width0;
+      blit.src.box.height = prsc->height0;
+      blit.src.box.depth = 1;
+      blit.dst.resource = rsc->shared_mirror;
+      blit.dst.format = rsc->shared_mirror->format;
+      blit.dst.box = blit.src.box;
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = PIPE_TEX_FILTER_NEAREST;
+
+      if (!fd_blit(pctx, &blit)) {
+         static bool warned = false;
+
+         /* Nothing useful to do about it here, and it would repeat every
+          * frame: the mirror keeps whatever it held, so the display side
+          * shows a stale frame rather than a wrong one.
+          */
+         if (!warned) {
+            warned = true;
+            mesa_logw("blit into the shared %s mirror failed; the displayed "
+                      "frame will not update",
+                      util_format_short_name(rsc->shared_mirror->format));
+         }
+      }
+
+      /* From here on the buffer that has to reach the kernel is the mirror:
+       * it is the one the display side will read.
+       */
+      rsc = fd_resource(rsc->shared_mirror);
+   }
+
    /* Flushing the resource is only required if we are relying on
     * implicit-sync, in which case the rendering must be flushed
     * to the kernel for the fence to be added to the backing GEM
@@ -1064,6 +1111,7 @@ fd_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *prsc)
       fd_bo_del(rsc->lrz);
    if (rsc->scanout)
       renderonly_scanout_destroy(rsc->scanout, fd_screen(pscreen)->ro);
+   pipe_resource_reference(&rsc->shared_mirror, NULL);
 
    if (prsc->target == PIPE_BUFFER)
       util_idalloc_mt_free(&screen->buffer_ids, rsc->b.buffer_id_unique);
@@ -1098,6 +1146,16 @@ fd_resource_get_handle(struct pipe_screen *pscreen, struct pipe_context *pctx,
    assert_dt
 {
    struct fd_resource *rsc = fd_resource(prsc);
+
+   /* The mirror is the buffer the platform allocator handed out, and the only
+    * one of the pair that is shareable at all; the resource rendering goes to
+    * was allocated the ordinary way.  fd_flush_resource() is what keeps its
+    * contents up to date.
+    */
+   if (rsc->shared_mirror) {
+      prsc = rsc->shared_mirror;
+      rsc = fd_resource(prsc);
+   }
 
    rsc->b.is_shared = true;
 
@@ -1443,6 +1501,59 @@ static struct pipe_resource *resource_from_bo(struct pipe_screen *pscreen,
                                               struct fd_bo *bo,
                                               struct winsys_handle *handle);
 
+DEBUG_GET_ONCE_OPTION(shared_image_format, "FD_SHARED_IMAGE_FORMAT", "rgba")
+
+static bool shared_image_rgba;
+
+static void
+shared_image_format_once(void)
+{
+   const char *opt = debug_get_option_shared_image_format();
+
+   shared_image_rgba = !strcasecmp(opt, "rgba");
+
+   if (!shared_image_rgba && strcasecmp(opt, "bgra"))
+      mesa_logw("FD_SHARED_IMAGE_FORMAT=%s is neither rgba nor bgra; "
+                "sharing images in the order they were rendered in", opt);
+}
+
+/**
+ * The channel order to allocate a shared image in, for a resource in
+ * `format`.
+ *
+ * Winlator's DisplayX hands these buffers to the display pipeline directly,
+ * and which order that pipeline survives is a property of the device, not of
+ * the X visual the resource was created for -- newer ones are reported to
+ * reboot on BGRA.  But the X server publishes a BGRA visual and nothing else,
+ * so a GL client has no way to render in the other order.
+ *
+ * Returning a different format than the caller's is the request to bridge
+ * that: fd_resource_create_with_modifiers() gives the caller a resource in
+ * its own order and allocates the shared image in this one, and
+ * fd_flush_resource() converts between them.  That costs a full-surface blit
+ * per frame, which is why FD_SHARED_IMAGE_FORMAT=bgra turns it off and shares
+ * the buffer in whatever order it was rendered in.
+ */
+static enum pipe_format
+shared_image_format(enum pipe_format format)
+{
+   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
+
+   util_call_once(&once, shared_image_format_once);
+
+   if (!shared_image_rgba)
+      return format;
+
+   switch (format) {
+   case PIPE_FORMAT_B8G8R8A8_UNORM:
+      return PIPE_FORMAT_R8G8B8A8_UNORM;
+   case PIPE_FORMAT_B8G8R8X8_UNORM:
+      return PIPE_FORMAT_R8G8B8X8_UNORM;
+   default:
+      return format;
+   }
+}
+
 /**
  * The formats the platform image allocator can be asked for.  The other half
  * of the mapping lives in the drm backend; a format missing from either end
@@ -1476,6 +1587,7 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
                                   const uint64_t *modifiers, int count)
 {
    struct fd_screen *screen = fd_screen(pscreen);
+   struct pipe_resource *mirror = NULL;
    struct fd_resource *rsc;
    struct pipe_resource *prsc;
    uint32_t size;
@@ -1488,8 +1600,12 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
     */
    if ((tmpl->bind & PIPE_BIND_SCANOUT) &&
        (fd_get_features(screen->dev) & FD_FEATURE_SHARED_IMAGE)) {
-      uint32_t fourcc = shared_image_fourcc(tmpl->format);
+      struct pipe_resource shared_tmpl = *tmpl;
       uint32_t pitch = 0;
+
+      shared_tmpl.format = shared_image_format(tmpl->format);
+
+      uint32_t fourcc = shared_image_fourcc(shared_tmpl.format);
 
       if (fourcc != DRM_FORMAT_INVALID) {
          struct fd_bo *bo = fd_bo_new_shared_image(
@@ -1505,13 +1621,21 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
                .stride = pitch,
             };
 
-            prsc = resource_from_bo(pscreen, tmpl, bo, &handle);
-            if (prsc)
-               return prsc;
+            mirror = resource_from_bo(pscreen, &shared_tmpl, bo, &handle);
 
-            /* The allocator's pitch was one the layout code would not accept.
-             * Keep going rather than failing the allocation outright: an
-             * ordinary buffer still renders, it just cannot be handed over.
+            /* Same channel order, so there is nothing to convert: the caller
+             * renders straight into the buffer that gets handed over.
+             */
+            if (mirror && shared_tmpl.format == tmpl->format)
+               return mirror;
+
+            /* Otherwise fall through to an ordinary allocation in the
+             * caller's own format, and keep this one as its mirror.
+             *
+             * resource_from_bo() returning NULL lands here too: the
+             * allocator's pitch was one the layout code would not accept.
+             * Keep going rather than failing outright -- an ordinary buffer
+             * still renders, it just cannot be handed over.
              */
          }
       }
@@ -1520,8 +1644,12 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
    /* when using kmsro, scanout buffers are allocated on the display device
     * create_with_modifiers() doesn't give us usage flags, so we have to
     * assume that all calls with modifiers are scanout-possible
+    *
+    * Skipped when we already hold a shared image: that buffer is the one
+    * being handed over, and a renderonly scanout on top of it would be a
+    * second, unrelated answer to the same question.
     */
-   if (screen->ro &&
+   if (!mirror && screen->ro &&
        ((tmpl->bind & PIPE_BIND_SCANOUT) ||
         has_explicit_modifier(modifiers, count))) {
       struct pipe_resource scanout_templat = *tmpl;
@@ -1551,16 +1679,21 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
    prsc =
       fd_resource_allocate_and_resolve(pscreen, tmpl, modifiers, count, &size);
    if (!prsc)
-      return NULL;
+      goto fail_mirror;
    rsc = fd_resource(prsc);
 
    realloc_bo(rsc, size);
    if (!rsc->bo)
       goto fail;
 
+   /* Ownership of the reference resource_from_bo() returned. */
+   rsc->shared_mirror = mirror;
+
    return prsc;
 fail:
    fd_resource_destroy(pscreen, prsc);
+fail_mirror:
+   pipe_resource_reference(&mirror, NULL);
    return NULL;
 }
 

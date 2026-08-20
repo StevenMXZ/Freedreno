@@ -116,6 +116,15 @@ struct fd_resource {
    bool valid;
    struct renderonly_scanout *scanout;
 
+   /* A shareable mirror of this resource in the channel order the platform
+    * image allocator was asked for, when that is not the order this resource
+    * is in.  Rendering goes here; fd_flush_resource() blits into the mirror,
+    * and the mirror is what fd_resource_get_handle() exports.  NULL when the
+    * two orders agree, which is the case that costs nothing.
+    * See shared_image_format().
+    */
+   struct pipe_resource *shared_mirror;
+
    /* reference to the resource holding stencil data for a z32_s8 texture */
    /* TODO rename to secondary or auxiliary? */
    struct fd_resource *stencil;
