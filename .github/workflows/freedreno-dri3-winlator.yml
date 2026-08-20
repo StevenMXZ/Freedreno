@@ -1,0 +1,210 @@
+name: freedreno DRI3 Winlator (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Mesa branch/ref to build
+        required: true
+        default: freedreno-dri-cmod-rgba-zero-copy
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: android-ndk-r27
+  API_LEVEL: '26'
+  ROOT: /home/runner/mesa-android
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out selected Mesa ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 1
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bison flex pkg-config patchelf zstd unzip curl binutils cmake \
+            python3-pip dpkg-dev
+          pip3 install --break-system-packages --upgrade meson ninja mako pyyaml
+
+      - name: Cache NDK and Termux sysroot
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ROOT }}/ndk
+            ${{ env.ROOT }}/dl
+            ${{ env.ROOT }}/sysroot
+          key: freedreno-dri3-${{ env.NDK_VERSION }}-api${{ env.API_LEVEL }}-termux-v2
+
+      - name: Prepare Android NDK and Termux X11 sysroot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$ROOT/dl" "$ROOT/ndk" "$ROOT/sysroot/lib" "$ROOT/sysroot/include"
+          TC="$ROOT/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64"
+
+          if [ ! -x "$TC/bin/clang" ]; then
+            curl -fL --retry 3 -o "$ROOT/dl/ndk.zip" \
+              "https://dl.google.com/android/repository/$NDK_VERSION-linux.zip"
+            unzip -q "$ROOT/dl/ndk.zip" -d "$ROOT/ndk"
+          fi
+
+          SYS="$ROOT/sysroot"
+          DL="$ROOT/dl/termux"
+          BASE="https://packages.termux.dev/apt/termux-main"
+          mkdir -p "$DL"
+          curl -fsSL -o "$DL/Packages" "$BASE/dists/stable/main/binary-aarch64/Packages"
+
+          packages=(
+            libx11 libxext libxxf86vm libxcb libxau libxdmcp libdrm
+            zlib zstd libxshmfence xorgproto
+          )
+
+          for p in "${packages[@]}"; do
+            fn=$(awk -v pkg="$p" 'BEGIN{RS="";FS="\n"}{n="";f="";
+              for(i=1;i<=NF;i++){
+                if($i~/^Package: /){n=$i;sub(/^Package: /,"",n)}
+                if($i~/^Filename: /){f=$i;sub(/^Filename: /,"",f)}
+              }
+              if(n==pkg)print f}' "$DL/Packages" | head -1)
+            test -n "$fn" || { echo "Termux package not found: $p" >&2; exit 1; }
+            deb="$DL/$(basename "$fn")"
+            [ -f "$deb" ] || curl -fsSL -o "$deb" "$BASE/$fn"
+          done
+
+          rm -rf "$DL/stage"
+          mkdir -p "$DL/stage"
+          for deb in "$DL"/*.deb; do
+            dpkg-deb -x "$deb" "$DL/stage"
+          done
+
+          TXP="$DL/stage/data/data/com.termux/files/usr"
+          cp -a "$TXP/lib/." "$SYS/lib/"
+          cp -a "$TXP/include/." "$SYS/include/"
+
+          if compgen -G "$SYS/lib/pkgconfig/*.pc" > /dev/null; then
+            sed -i "s|/data/data/com.termux/files/usr|$SYS|g" "$SYS"/lib/pkgconfig/*.pc
+          fi
+
+          for lib in libX11.so libX11-xcb.so libxcb.so libxcb-dri3.so libxcb-present.so libdrm.so libxshmfence.so; do
+            test -e "$SYS/lib/$lib" || { echo "sysroot is missing $lib" >&2; exit 1; }
+          done
+
+      - name: Configure Mesa for Winlator Bionic DRI3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SYS="$ROOT/sysroot"
+          TC="$ROOT/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64"
+          CROSS="$ROOT/cross-android-aarch64.ini"
+
+          cat > "$CROSS" <<EOF
+          [binaries]
+          c           = '$TC/bin/aarch64-linux-android$API_LEVEL-clang'
+          cpp         = '$TC/bin/aarch64-linux-android$API_LEVEL-clang++'
+          ar          = '$TC/bin/llvm-ar'
+          strip       = '$TC/bin/llvm-strip'
+          ranlib      = '$TC/bin/llvm-ranlib'
+          objcopy     = '$TC/bin/llvm-objcopy'
+          pkg-config  = '$(command -v pkg-config)'
+          cmake       = '$(command -v cmake)'
+
+          [built-in options]
+          c_args        = ['-I$SYS/include']
+          cpp_args      = ['-I$SYS/include']
+          c_link_args   = ['-L$SYS/lib']
+          cpp_link_args = ['-L$SYS/lib']
+
+          [properties]
+          needs_exe_wrapper = true
+          pkg_config_libdir = '$SYS/lib/pkgconfig'
+
+          [host_machine]
+          system     = 'android'
+          cpu_family = 'aarch64'
+          cpu        = 'aarch64'
+          endian     = 'little'
+          EOF
+
+          rm -rf build out
+          meson setup build \
+            --cross-file "$CROSS" \
+            --prefix=/usr --libdir=lib \
+            --buildtype=release -Db_ndebug=true \
+            -Dgallium-drivers=freedreno \
+            -Dvulkan-drivers= \
+            -Dfreedreno-kmds=kgsl \
+            -Dglx=dri \
+            -Ddri3=enabled \
+            -Dplatforms=x11 \
+            -Dxlib-lease=disabled \
+            -Degl=disabled -Dgbm=disabled \
+            -Dgles1=disabled -Dgles2=disabled -Dopengl=true \
+            -Dglvnd=disabled -Dllvm=disabled \
+            -Dxmlconfig=disabled -Dzstd=enabled \
+            -Dlibunwind=disabled -Dvalgrind=disabled \
+            -Dbuild-tests=false -Dandroid-libbacktrace=disabled \
+            -Dvideo-codecs=
+
+      - name: Build and install
+        shell: bash
+        run: |
+          set -euo pipefail
+          ninja -C build -j"$(nproc)"
+          DESTDIR="$PWD/out" meson install -C build --no-rebuild
+
+      - name: Verify zero-copy test build and package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TC="$ROOT/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64"
+          RE="$TC/bin/llvm-readelf"
+
+          echo "Installed libraries:"
+          find out/usr -type f -o -type l | sort
+
+          GL=$(find out/usr -type f -name 'libGL.so*' | head -1)
+          GALLIUM=$(find out/usr -type f \( -name 'libgallium*.so' -o -name 'gallium_dri.so' \) | head -1)
+
+          test -n "$GL" || { echo "libGL was not installed" >&2; exit 1; }
+          test -n "$GALLIUM" || { echo "Gallium DRI library was not installed" >&2; exit 1; }
+
+          echo "libGL: $GL"
+          "$RE" -d "$GL" | grep NEEDED || true
+          echo "Gallium: $GALLIUM"
+          "$RE" -d "$GALLIUM" | grep NEEDED || true
+
+          # This test branch must contain both optimizations we want to measure.
+          grep -q 'DRM_FORMAT_XRGB8888' src/loader/loader_dri_helper.c
+          grep -q 'PIPE_FORMAT_R8G8B8X8_UNORM' src/loader/loader_dri_helper.c
+          grep -q 'bool fence_await = false;' src/gallium/frontends/dri/loader_dri3_helper.c
+
+          sha=$(git rev-parse --short HEAD)
+          ref=$(git rev-parse --abbrev-ref HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+          tar --zstd -cf "opengl_freedreno-dri3-${sha}.tzst" \
+            --owner=0 --group=0 -C out usr
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freedreno-dri3-${{ steps.package.outputs.sha }}
+          path: |
+            opengl_freedreno-dri3-${{ steps.package.outputs.sha }}.tzst
+            out/usr/
+          if-no-files-found: error
