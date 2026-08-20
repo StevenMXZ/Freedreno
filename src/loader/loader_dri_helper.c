@@ -81,6 +81,32 @@ static const struct {
 enum pipe_format
 loader_fourcc_to_pipe_format(uint32_t fourcc)
 {
+   /*
+    * Winlator's X server exposes the conventional XRGB/ARGB visual masks, but
+    * its DRI3 Present path does not scan out X pixmap bytes.  The fd is a
+    * socket carrying an AHardwareBuffer and DisplayX presents that AHB
+    * directly.  On Android the safe shared format is RGBA_8888.
+    *
+    * Keep the reverse pipe->FourCC mapping unchanged so GLX still speaks the
+    * XRGB/ARGB format the X visual expects, but allocate the actual Gallium
+    * image as R8G8B8{X,A}8.  Freedreno then sees an RGBA render target, asks
+    * the platform allocator for the same RGBA AHB, and renders directly into
+    * the buffer that DRI3 exports.  There is no BGRA render target, no
+    * shared_mirror and no full-surface channel-conversion blit at present.
+    *
+    * This branch is a Winlator-specific DRI3 downstream; the intentional
+    * asymmetry is what bridges its X visual metadata to its Android display
+    * storage without copying pixels.
+    */
+   switch (fourcc) {
+   case DRM_FORMAT_XRGB8888:
+      return PIPE_FORMAT_R8G8B8X8_UNORM;
+   case DRM_FORMAT_ARGB8888:
+      return PIPE_FORMAT_R8G8B8A8_UNORM;
+   default:
+      break;
+   }
+
    for (int i = 0; i < ARRAY_SIZE(pipe_format_to_fourcc); i++) {
       if (pipe_format_to_fourcc[i].fourcc == fourcc)
          return pipe_format_to_fourcc[i].pipe;
