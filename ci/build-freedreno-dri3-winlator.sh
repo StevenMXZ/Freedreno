@@ -68,6 +68,18 @@ build_sysroot() {
   done
 }
 
+apply_branch_patches() {
+  local patch="$SRCDIR/ci/freedreno-perf-safe.patch"
+
+  if [ ! -f "$patch" ]; then
+    return
+  fi
+
+  log "Applying branch-local Freedreno performance patch"
+  git -C "$SRCDIR" apply --check --recount "$patch"
+  git -C "$SRCDIR" apply --recount "$patch"
+}
+
 write_cross_file() {
   log "Writing Meson Android cross file"
   cat > "$ROOT/cross-android-aarch64.ini" <<EOF
@@ -155,6 +167,16 @@ verify_package() {
   grep -q 'PIPE_FORMAT_R8G8B8X8_UNORM' src/loader/loader_dri_helper.c
   grep -q 'bool fence_await = false;' src/gallium/frontends/dri/loader_dri3_helper.c
 
+  # If this ref carries the branch-local async performance patch, make sure it
+  # actually landed in the source before packaging rather than silently
+  # producing the baseline artifact.
+  if [ -f ci/freedreno-perf-safe.patch ]; then
+    grep -q 'draw->max_num_back = LOADER_DRI3_MAX_BACK;' \
+      src/gallium/frontends/dri/loader_dri3_helper.c
+    grep -q 'if (draw->swap_interval != 0)' \
+      src/gallium/frontends/dri/loader_dri3_helper.c
+  fi
+
   echo "Installed libraries:"
   find out/usr \( -type f -o -type l \) -print | sort
 
@@ -166,6 +188,7 @@ verify_package() {
 
 fetch_ndk
 build_sysroot
+apply_branch_patches
 write_cross_file
 configure
 compile_install
