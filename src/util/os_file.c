@@ -200,7 +200,7 @@ os_read_file(const char *filename, size_t *size)
    return buf;
 }
 
-#if (DETECT_OS_LINUX || DETECT_OS_FREEBSD) && ALLOW_KCMP
+#if (DETECT_OS_LINUX || DETECT_OS_FREEBSD) && ALLOW_KCMP && !DETECT_OS_ANDROID
 
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -235,7 +235,7 @@ typedef void *kvaddr_t;
 int
 os_same_file_description(int fd1, int fd2)
 {
-#ifdef SYS_kcmp
+#if defined(SYS_kcmp) && !DETECT_OS_ANDROID
    pid_t pid = getpid();
 #endif
 
@@ -255,7 +255,7 @@ os_same_file_description(int fd1, int fd2)
    }
 #endif
 
-#ifdef SYS_kcmp
+#if defined(SYS_kcmp) && !DETECT_OS_ANDROID
    return syscall(SYS_kcmp, pid, pid, KCMP_FILE, fd1, fd2);
 #elif DETECT_OS_DRAGONFLY || DETECT_OS_FREEBSD
    int mib[] = { CTL_KERN, KERN_FILE };
