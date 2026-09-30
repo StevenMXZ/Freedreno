@@ -32,7 +32,7 @@ jobs:
       - name: Check out CI helper
         uses: actions/checkout@v4
         with:
-          ref: freedreno-winlator
+          ref: main
           path: helper
           sparse-checkout: ci
           sparse-checkout-cone-mode: true
