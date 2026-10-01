@@ -45,14 +45,40 @@ get_relative_ms(uint64_t abs_timeout_ns)
  * kgsl_safe_ioctl() is not enough here: a restarted wait has to have its
  * timeout adjusted, or we could wait substantially longer than asked.
  */
+static bool
+kgsl_timestamp_retired_direct(int fd, unsigned int context_id,
+                              unsigned int timestamp)
+{
+   struct kgsl_cmdstream_readtimestamp_ctxtid req = {
+      .context_id = context_id,
+      .type = KGSL_TIMESTAMP_RETIRED,
+   };
+
+   if (kgsl_safe_ioctl(fd, IOCTL_KGSL_CMDSTREAM_READTIMESTAMP_CTXTID, &req))
+      return false;
+
+   return (int32_t)(req.timestamp - timestamp) >= 0;
+}
+
 static int
 wait_timestamp_safe(int fd, unsigned int context_id, unsigned int timestamp,
                     uint64_t abs_timeout_ns)
 {
+   int timeout_ms = get_relative_ms(abs_timeout_ns);
+
+   /*
+    * KGSL treats a wait timeout of zero as an indefinite wait.  For an
+    * already-expired deadline we instead query the retired timestamp
+    * directly, so this remains a non-blocking poll.
+    */
+   if (timeout_ms == 0)
+      return kgsl_timestamp_retired_direct(fd, context_id, timestamp) ?
+             0 : (errno = ETIMEDOUT, -1);
+
    struct kgsl_device_waittimestamp_ctxtid wait = {
       .context_id = context_id,
       .timestamp = timestamp,
-      .timeout = get_relative_ms(abs_timeout_ns),
+      .timeout = timeout_ms,
    };
 
    while (true) {
