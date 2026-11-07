@@ -10,7 +10,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   NDK_VERSION: android-ndk-r27
@@ -64,11 +64,26 @@ jobs:
           sha=$(cat mesa/.freedreno-dri3-build-sha)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifact
+      - name: Package minimal importable OpenGL driver
+        run: |
+          python3 -m unittest discover -s helper/ci -p test_package_freedreno.py
+          python3 helper/ci/package-freedreno.py mesa/out/usr/lib \
+            "mesa/Freedreno-DRI3-${{ steps.package.outputs.sha }}.zip" \
+            --version "${{ github.run_number }}.${{ github.run_attempt }}"
+
+      - name: Upload importable driver
         uses: actions/upload-artifact@v4
         with:
           name: freedreno-dri3-${{ steps.package.outputs.sha }}
-          path: |
-            mesa/opengl_freedreno-dri3-${{ steps.package.outputs.sha }}.tzst
-            mesa/out/usr/
+          path: mesa/Freedreno-DRI3-${{ steps.package.outputs.sha }}.zip
           if-no-files-found: error
+
+      - name: Publish driver release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "freedreno-dri3-${{ steps.package.outputs.sha }}-${{ github.run_number }}-${{ github.run_attempt }}" \
+            "mesa/Freedreno-DRI3-${{ steps.package.outputs.sha }}.zip" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Freedreno DRI3 ${{ steps.package.outputs.sha }}" \
+            --notes "Import the ZIP through Ludashi Components, then select it under Freedreno OpenGL. Requires a compatible Winlator Bionic runtime."
