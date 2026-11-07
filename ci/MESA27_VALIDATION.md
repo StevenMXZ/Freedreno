@@ -6,7 +6,7 @@ The complete port notes and host regression tests live in that branch's `ci/`.
 Use `freedreno-dri-cmod-rgba-zero-copy` in the workflow's source_ref field to
 build the previous runtime for comparison. Its history has not been rewritten.
 
-Source commit `259b78ca0e` was cross-compiled and installed successfully using
+Source commit `eef2dcf647` was cross-compiled and installed successfully using
 NDK r27 / aarch64-android API 26 and this helper's Meson options. Both libGL
 and libgallium were linked. Their DT_NEEDED lists add no runtime dependencies
 relative to the previously bundled DRI3 driver.
