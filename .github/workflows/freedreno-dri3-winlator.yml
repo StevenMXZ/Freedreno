@@ -6,7 +6,7 @@ on:
       source_ref:
         description: Mesa branch/ref to build
         required: true
-        default: freedreno-dri-cmod-rgba-zero-copy
+        default: freedreno-dri3-mesa-27
         type: string
 
 permissions:
@@ -55,6 +55,16 @@ jobs:
             ${{ env.ROOT }}/sysroot
           key: freedreno-dri3-${{ env.NDK_VERSION }}-api${{ env.API_LEVEL }}-termux-v2
 
+      - name: Test KGSL deadlines and Winlator Present events
+        run: |
+          for test in test_kgsl_wait test_dri3_idle; do
+            if [ -f "mesa/ci/$test.c" ]; then
+              cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+                "mesa/ci/$test.c" -o "$RUNNER_TEMP/$test"
+              "$RUNNER_TEMP/$test"
+            fi
+          done
+
       - name: Build Winlator DRI3 driver
         run: bash helper/ci/build-freedreno-dri3-winlator.sh "$GITHUB_WORKSPACE/mesa"
 
@@ -82,8 +92,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          release_flags=()
+          if grep -q devel mesa/VERSION; then release_flags+=(--prerelease); fi
           gh release create "freedreno-dri3-${{ steps.package.outputs.sha }}-${{ github.run_number }}-${{ github.run_attempt }}" \
             "mesa/Freedreno-DRI3-${{ steps.package.outputs.sha }}.zip" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            "${release_flags[@]}" \
             --title "Freedreno DRI3 ${{ steps.package.outputs.sha }}" \
             --notes "Import the ZIP through Ludashi Components, then select it under Freedreno OpenGL. Requires a compatible Winlator Bionic runtime."
