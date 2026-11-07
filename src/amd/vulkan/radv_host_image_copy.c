@@ -31,8 +31,13 @@ radv_get_surface_copy_region(struct radv_device *device, const struct radv_image
    const uint32_t texel_scale = radv_get_texel_scale(image->vk.format, subresource);
    const VkOffset3D img_offset_el = vk_image_offset_to_elements(&image->vk, image_offset);
    const VkExtent3D img_extent_el = vk_image_extent_to_elements(&image->vk, image_extent);
-   const uint32_t mem_row_pitch = memory_row_length ? memory_row_length : img_extent_el.width;
-   const uint32_t mem_slice_pitch = (memory_image_height ? memory_image_height : img_extent_el.height) * mem_row_pitch;
+   const VkExtent3D memory_extent = {
+      .width = memory_row_length ? memory_row_length : image_extent.width,
+      .height = memory_image_height ? memory_image_height : image_extent.height,
+   };
+   const VkExtent3D memory_extent_el = vk_image_extent_to_elements(&image->vk, memory_extent);
+   const uint32_t mem_row_pitch = memory_extent_el.width;
+   const uint32_t mem_slice_pitch = memory_extent_el.height * mem_row_pitch;
 
    const struct ac_surface_copy_region surf_copy_region = {
       .surf_ptr = surf_ptr,
@@ -62,7 +67,7 @@ radv_get_surface_copy_region(struct radv_device *device, const struct radv_image
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
-radv_CopyImageToMemoryEXT(VkDevice _device, const VkCopyImageToMemoryInfo *pCopyImageToMemoryInfo)
+radv_CopyImageToMemory(VkDevice _device, const VkCopyImageToMemoryInfo *pCopyImageToMemoryInfo)
 {
    VK_FROM_HANDLE(radv_device, device, _device);
    VK_FROM_HANDLE(radv_image, image, pCopyImageToMemoryInfo->srcImage);
@@ -89,7 +94,7 @@ radv_CopyImageToMemoryEXT(VkDevice _device, const VkCopyImageToMemoryInfo *pCopy
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
-radv_CopyMemoryToImageEXT(VkDevice _device, const VkCopyMemoryToImageInfo *pCopyMemoryToImageInfo)
+radv_CopyMemoryToImage(VkDevice _device, const VkCopyMemoryToImageInfo *pCopyMemoryToImageInfo)
 {
    VK_FROM_HANDLE(radv_device, device, _device);
    VK_FROM_HANDLE(radv_image, image, pCopyMemoryToImageInfo->dstImage);
@@ -116,7 +121,7 @@ radv_CopyMemoryToImageEXT(VkDevice _device, const VkCopyMemoryToImageInfo *pCopy
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
-radv_CopyImageToImageEXT(VkDevice _device, const VkCopyImageToImageInfo *pCopyImageToImageInfo)
+radv_CopyImageToImage(VkDevice _device, const VkCopyImageToImageInfo *pCopyImageToImageInfo)
 {
    VkResult result = VK_SUCCESS;
 
@@ -154,7 +159,7 @@ radv_CopyImageToImageEXT(VkDevice _device, const VkCopyImageToImageInfo *pCopyIm
                },
          };
 
-         result = radv_CopyImageToMemoryEXT(_device, &image_to_memory);
+         result = radv_CopyImageToMemory(_device, &image_to_memory);
          if (result == VK_SUCCESS) {
             const VkCopyMemoryToImageInfo memory_to_image = {
                .sType = VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO,
@@ -174,7 +179,7 @@ radv_CopyImageToImageEXT(VkDevice _device, const VkCopyImageToImageInfo *pCopyIm
                   },
             };
 
-            result = radv_CopyMemoryToImageEXT(_device, &memory_to_image);
+            result = radv_CopyMemoryToImage(_device, &memory_to_image);
          }
 
          free(host_ptr);

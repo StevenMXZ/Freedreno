@@ -1390,6 +1390,20 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
 
         struct qreg result;
 
+        if (instr->op == nir_op_uadd_with_carry_out ||
+            instr->op == nir_op_usub_with_borrow_out) {
+                if (instr->op == nir_op_uadd_with_carry_out)
+                        result = vir_ADD(c, src[0], src[1]);
+                else
+                        result = vir_SUB(c, src[0], src[1]);
+
+                vir_set_pf(c, c->defs[result.index], V3D_QPU_PF_PUSHC);
+                ntq_store_def(c, &instr->def, 0, result);
+                ntq_store_def(c, &instr->def, 1, ntq_emit_cond_to_int(c, V3D_QPU_COND_IFA));
+                return;
+        }
+
+
         switch (instr->op) {
         case nir_op_mov:
                 result = vir_MOV(c, src[0]);
@@ -1792,18 +1806,6 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
                 result = vir_MAX(c, src[0], vir_NEG(c, src[0]));
                 break;
 
-        case nir_op_uadd_carry:
-                vir_set_pf(c, vir_ADD_dest(c, vir_nop_reg(), src[0], src[1]),
-                           V3D_QPU_PF_PUSHC);
-                result = ntq_emit_cond_to_int(c, V3D_QPU_COND_IFA);
-                break;
-
-        case nir_op_usub_borrow:
-                vir_set_pf(c, vir_SUB_dest(c, vir_nop_reg(), src[0], src[1]),
-                           V3D_QPU_PF_PUSHC);
-                result = ntq_emit_cond_to_int(c, V3D_QPU_COND_IFA);
-                break;
-
         case nir_op_pack_half_2x16_split:
                 result = vir_VFPACK(c, src[0], src[1]);
                 break;
@@ -1862,8 +1864,24 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
 
         case nir_op_fsat:
                 assert(v3d_device_has_unpack_sat(c->devinfo));
-                result = vir_FMOV(c, src[0]);
-                vir_set_unpack(c->defs[result.index], 0, V3D71_QPU_UNPACK_SAT);
+                if (instr->def.bit_size == 16) {
+                        /* The SAT unpack saturates a 32-bit float, so it
+                         * would misinterpret f16 bits. nir_opt_algebraic can
+                         * form a 16-bit fsat from native f16 fmin/fmax after
+                         * the last bit-size lowering.
+                         */
+                        struct qreg f32 = vir_FMOV(c, src[0]);
+                        vir_set_unpack(c->defs[f32.index], 0,
+                                       V3D_QPU_UNPACK_L);
+                        result = vir_FMOV(c, f32);
+                        vir_set_unpack(c->defs[result.index], 0,
+                                       V3D71_QPU_UNPACK_SAT);
+                        vir_set_pack(c->defs[result.index], V3D_QPU_PACK_L);
+                } else {
+                        result = vir_FMOV(c, src[0]);
+                        vir_set_unpack(c->defs[result.index], 0,
+                                       V3D71_QPU_UNPACK_SAT);
+                }
                 break;
 
         case nir_op_fsat_signed:
@@ -2174,6 +2192,17 @@ mem_vectorize_callback(unsigned align_mul, unsigned align_offset,
         if (hole_size > 0 || !nir_num_components_valid(num_components))
                 return false;
 
+        /* Keep robust SSBO stores scalar before robustness lowering, so each
+         * one gets an independent bounds check. Once the lowering runs out of
+         * bounds stores will be dropped and we can safely vectorize any
+         * survivors.
+         */
+        const struct v3d_compile *c = data;
+        if (c->key->robust_storage_access && !c->robust_access_lowered &&
+            low->intrinsic == nir_intrinsic_store_ssbo) {
+                return false;
+        }
+
         /* TMU general access only supports 32-bit vectors */
         if (bit_size > 32)
                 return false;
@@ -2271,7 +2300,7 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                 NIR_PASS(progress, s, nir_opt_if, false);
                 if (c && !c->disable_gcm) {
                         bool local_progress = false;
-                        NIR_PASS(local_progress, s, nir_opt_gcm, false, true);
+                        NIR_PASS(local_progress, s, nir_opt_gcm, false);
                         c->gcm_progress |= local_progress;
                         progress |= local_progress;
                 }
@@ -2288,6 +2317,7 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                                  nir_var_mem_push_const | nir_var_mem_shared |
                                  nir_var_mem_global,
                         .callback = mem_vectorize_callback,
+                        .cb_data = c,
                         .robust_modes = 0,
                 };
                 bool vectorize_progress = false;
@@ -2498,8 +2528,24 @@ ntq_setup_fs_inputs(struct v3d_compile *c)
                         c->inputs[loc * 4] = c->primitive_id;
                 } else if (util_varying_is_point_coord(var->data.location,
                                                        c->fs_key->point_sprite_mask)) {
+                        /* gl_PointCoord is flipped in lower_pntc_ytransform,
+                         * but varyings replaced through GL_COORD_REPLACE
+                         * don't go through this lowering, so we need to
+                         * handle them here.
+                         *
+                         * Also Gallium requires the texture coordinate be of
+                         * the form (s, t, 0, 1).
+                         */
                         c->inputs[loc * 4 + 0] = c->point_x;
-                        c->inputs[loc * 4 + 1] = c->point_y;
+                        if (var->data.location != VARYING_SLOT_PNTC &&
+                            c->fs_key->point_coord_upper_left) {
+                                c->inputs[loc * 4 + 1] = vir_FSUB(c, vir_uniform_f(c, 1.0),
+                                                                  c->point_y);
+                        } else {
+                                c->inputs[loc * 4 + 1] = c->point_y;
+                        }
+                        c->inputs[loc * 4 + 2] = vir_uniform_f(c, 0.0);
+                        c->inputs[loc * 4 + 3] = vir_uniform_f(c, 1.0);
                 } else if (var->data.compact) {
                         for (int j = 0; j < var_len; j++)
                                 emit_compact_fragment_input(c, loc, var, j);
@@ -2632,27 +2678,17 @@ ntq_emit_image_size(struct v3d_compile *c, nir_intrinsic_instr *instr)
         }
 }
 
-static void
-vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
+static uint32_t
+tlb_read_config(struct v3d_compile *c, unsigned location,
+                unsigned num_components)
 {
-        assert(c->s->info.stage == MESA_SHADER_FRAGMENT);
-
-        int rt = nir_src_as_uint(instr->src[0]);
-        assert(rt < V3D_MAX_DRAW_BUFFERS);
-
-        int sample_index = nir_intrinsic_base(instr) ;
-        assert(sample_index < V3D_MAX_SAMPLES);
-
-        int component = nir_intrinsic_component(instr);
-        assert(component < 4);
-
         /* We need to emit our TLB reads after we have acquired the scoreboard
          * lock, or the GPU will hang. Usually, we do our scoreboard locking on
          * the last thread switch to improve parallelism, however, that is only
          * guaranteed to happen before the tlb color writes.
          *
          * To fix that, we make sure we always emit a thread switch before the
-         * first tlb color read. If that happens to be the last thread switch
+         * first tlb read. If that happens to be the last thread switch
          * we emit, then everything is fine, but otherwise, if any code after
          * this point needs to emit additional thread switches, then we will
          * switch the strategy to locking the scoreboard on the first thread
@@ -2665,12 +2701,54 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 c->emitted_tlb_load = true;
         }
 
+        uint32_t conf = 0xffffff00;
+        conf |= c->fs_key->msaa ? TLB_SAMPLE_MODE_PER_SAMPLE :
+                                  TLB_SAMPLE_MODE_PER_PIXEL;
+
+        if (location == FRAG_RESULT_DEPTH)
+                return conf | TLB_TYPE_DEPTH;
+
+        if (location == FRAG_RESULT_STENCIL)
+                return conf | TLB_TYPE_STENCIL_ALPHA;
+
+        unsigned rt = location - FRAG_RESULT_DATA0;
+        assert(rt < V3D_MAX_DRAW_BUFFERS);
+        conf |= (7 - rt) << TLB_RENDER_TARGET_SHIFT;
+
+        if (c->fs_key->f32_color_rb & (1 << rt)) {
+                conf |= TLB_TYPE_F32_COLOR;
+                conf |= (num_components - 1) << TLB_VEC_SIZE_MINUS_1_SHIFT;
+        } else {
+                conf |= TLB_TYPE_F16_COLOR | TLB_F16_SWAP_HI_LO;
+                conf |= num_components >= 3 ? TLB_VEC_SIZE_4_F16 :
+                                              TLB_VEC_SIZE_2_F16;
+        }
+
+        return conf;
+}
+
+static void
+vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
+{
+        assert(c->s->info.stage == MESA_SHADER_FRAGMENT);
+
+        int rt = nir_src_as_uint(instr->src[0]);
+        assert(rt < V3D_MAX_DRAW_BUFFERS);
+
+        int sample_index = nir_intrinsic_base(instr);
+        assert(sample_index < V3D_MAX_SAMPLES);
+
+        int component = nir_intrinsic_component(instr);
+        int load_components = instr->def.num_components;
+        assert(component + load_components <= 4);
+
         struct qreg *color_reads_for_sample =
                 &c->color_reads[(rt * V3D_MAX_SAMPLES + sample_index) * 4];
 
         if (color_reads_for_sample[component].file == QFILE_NULL) {
-                nir_variable *var = c->output_color_var[rt];
-                int num_components = glsl_get_vector_elements(var->type);
+                /* Load and cache all components requested by this instruction.
+                 */
+                int num_components = component + load_components;
 
                 const bool swap_rb = c->fs_key->swap_color_rb & (1 << rt);
                 if (swap_rb)
@@ -2678,42 +2756,25 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
 
                 int num_samples = c->fs_key->msaa ? V3D_MAX_SAMPLES : 1;
 
-                uint32_t conf = 0xffffff00;
-                conf |= c->fs_key->msaa ? TLB_SAMPLE_MODE_PER_SAMPLE :
-                                          TLB_SAMPLE_MODE_PER_PIXEL;
-                conf |= (7 - rt) << TLB_RENDER_TARGET_SHIFT;
-
-                if (c->fs_key->f32_color_rb & (1 << rt)) {
-                        conf |= TLB_TYPE_F32_COLOR;
-                        conf |= ((num_components - 1) <<
-                                 TLB_VEC_SIZE_MINUS_1_SHIFT);
-                } else {
-                        conf |= TLB_TYPE_F16_COLOR;
-                        conf |= TLB_F16_SWAP_HI_LO;
-
-                        if (num_components >= 3)
-                                conf |= TLB_VEC_SIZE_4_F16;
-                        else
-                                conf |= TLB_VEC_SIZE_2_F16;
-                }
-
+                uint32_t conf = tlb_read_config(c, FRAG_RESULT_DATA0 + rt,
+                                                num_components);
 
                 for (int i = 0; i < num_samples; i++) {
                         struct qreg r, g, b, a;
                         if (c->fs_key->f32_color_rb & (1 << rt)) {
                                 r = conf != 0xffffffff && i == 0?
-                                        vir_TLBU_COLOR_READ(c, conf) :
-                                        vir_TLB_COLOR_READ(c);
+                                        vir_TLBU_READ(c, conf) :
+                                        vir_TLB_READ(c);
                                 if (num_components >= 2)
-                                        g = vir_TLB_COLOR_READ(c);
+                                        g = vir_TLB_READ(c);
                                 if (num_components >= 3)
-                                        b = vir_TLB_COLOR_READ(c);
+                                        b = vir_TLB_READ(c);
                                 if (num_components >= 4)
-                                        a = vir_TLB_COLOR_READ(c);
+                                        a = vir_TLB_READ(c);
                         } else {
                                 struct qreg rg = conf != 0xffffffff && i == 0 ?
-                                        vir_TLBU_COLOR_READ(c, conf) :
-                                        vir_TLB_COLOR_READ(c);
+                                        vir_TLBU_READ(c, conf) :
+                                        vir_TLB_READ(c);
                                 r = vir_FMOV(c, rg);
                                 vir_set_unpack(c->defs[r.index], 0,
                                                V3D_QPU_UNPACK_L);
@@ -2722,7 +2783,7 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                                                V3D_QPU_UNPACK_H);
 
                                 if (num_components > 2) {
-                                    struct qreg ba = vir_TLB_COLOR_READ(c);
+                                    struct qreg ba = vir_TLB_READ(c);
                                     b = vir_FMOV(c, ba);
                                     vir_set_unpack(c->defs[b.index], 0,
                                                    V3D_QPU_UNPACK_L);
@@ -2745,9 +2806,38 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 }
         }
 
-        assert(color_reads_for_sample[component].file != QFILE_NULL);
-        ntq_store_def(c, &instr->def, 0,
-                      vir_MOV(c, color_reads_for_sample[component]));
+        for (int i = 0; i < load_components; i++) {
+                assert(color_reads_for_sample[component + i].file != QFILE_NULL);
+                ntq_store_def(c, &instr->def, i,
+                              vir_MOV(c, color_reads_for_sample[component + i]));
+        }
+}
+
+static void
+vir_emit_tlb_ds_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
+{
+        assert(c->s->info.stage == MESA_SHADER_FRAGMENT);
+
+        unsigned location = nir_intrinsic_io_semantics(instr).location;
+        assert(location == FRAG_RESULT_DEPTH || location == FRAG_RESULT_STENCIL);
+
+        unsigned sample_index = nir_intrinsic_base(instr);
+        assert(sample_index < V3D_MAX_SAMPLES);
+        assert(instr->def.num_components == 1);
+
+        unsigned index = location == FRAG_RESULT_DEPTH;
+        struct qreg *reads = &c->ds_reads[index * V3D_MAX_SAMPLES];
+        if (reads[sample_index].file == QFILE_NULL) {
+                unsigned samples = c->fs_key->msaa ? V3D_MAX_SAMPLES : 1;
+                uint32_t conf = tlb_read_config(c, location, 1);
+
+                for (unsigned i = 0; i < samples; i++) {
+                        reads[i] = i == 0 ? vir_TLBU_READ(c, conf) :
+                                            vir_TLB_READ(c);
+                }
+        }
+
+        ntq_store_def(c, &instr->def, 0, vir_MOV(c, reads[sample_index]));
 }
 
 static bool
@@ -3685,6 +3775,10 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
 
         case nir_intrinsic_load_tlb_color_brcm:
                 vir_emit_tlb_color_read(c, instr);
+                break;
+
+        case nir_intrinsic_load_tlb_depth_stencil_brcm:
+                vir_emit_tlb_ds_read(c, instr);
                 break;
 
         case nir_intrinsic_load_fep_w_v3d:

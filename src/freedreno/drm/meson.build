@@ -44,6 +44,7 @@ libfreedreno_drm_msm_files = files(
   'msm/msm_priv.h',
   'msm/msm_ringbuffer.c',
   'msm/msm_ringbuffer_sp.c',
+  'msm/msm_common.h',
 )
 libfreedreno_drm_files += libfreedreno_drm_msm_files
 
@@ -68,6 +69,7 @@ libfreedreno_drm_kgsl_files = files(
   'kgsl/kgsl_bo.c',
   'kgsl/kgsl_device.c',
   'kgsl/kgsl_pipe.c',
+  'kgsl/kgsl_wait.h',
   'kgsl/kgsl_priv.h',
   'kgsl/kgsl_ringbuffer_sp.c',
 )

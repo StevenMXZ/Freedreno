@@ -27,12 +27,12 @@ lower_non_tied_default(jay_builder *b, jay_inst *I, jay_def default_)
       jay_remove_instruction(I);
    } else {
       jay_foreach_comp(I->dst, c) {
-         jay_def dst = jay_bare_reg(I->dst.file, I->dst.reg + c);
-         jay_def src = jay_bare_reg(default_.file, default_.reg + c);
+         jay_def dst = jay_bare_reg(I->dst.file, I->dst.reg + c * 2);
+         jay_def src = jay_bare_reg(default_.file, default_.reg + c * 2);
 
          jay_inst *mov = jay_MOV(b, dst, src);
          mov->type = I->type;
-         jay_add_predicate(b, mov, not_pred);
+         jay_add_predicate(b, mov, not_pred, jay_null());
       }
    }
 }
@@ -71,15 +71,19 @@ lower(jay_builder *b, jay_inst *I)
          if (stride_sz < type_sz) {
             assert(stride_sz == 16 && type_sz == 32 && "no other case hit");
             I->type = JAY_TYPE_U16;
+            I->dst.size = JAY_SIZE_16;
+            I->src[0].size = JAY_SIZE_16;
 
-            dst.hi = true;
-            src.hi = true;
+            dst = I->dst;
+            src = I->src[0];
+            dst.reg++;
+            src.reg++;
             jay_MOV(b, dst, src)->type = JAY_TYPE_U16;
          }
       }
 
       /* Do moves on the float point to promote accumulator usage */
-      if (I->type == JAY_TYPE_U32 &&
+      if (I->type == JAY_TYPE_U32 && !I->conditional_mod &&
           I->dst.file == GPR &&
           jay_def_stride(b->shader, I->dst) == JAY_STRIDE_4 &&
           ((I->src[0].file == GPR &&
@@ -126,25 +130,43 @@ pass(jay_function *func)
 {
    jay_foreach_block(func, block) {
       BITSET_DECLARE(inactive_are_0, JAY_MAX_FLAGS) = { 0 };
+      bool a0_valid = false;
 
       jay_foreach_inst_in_block_safe(block, I) {
          jay_builder b = jay_init_builder(func, jay_before_inst(I));
 
-         if (jay_inst_has_default(I)) {
-            if (!jay_regs_equal(jay_is_null(I->dst) ? I->cond_flag : I->dst,
-                                *jay_inst_get_default(I))) {
-               lower_non_tied_default(&b, I, *jay_inst_get_default(I));
+         if (I->predication > 1) {
+            jay_def dsts[] = { jay_is_null(I->dst) ? I->cond_flag : I->dst,
+                               I->cond_flag };
+            for (unsigned i = 1; i < I->predication; ++i) {
+               jay_def def = I->src[I->num_srcs - I->predication + i];
+               if (!jay_regs_equal(dsts[i - 1], def)) {
+                  lower_non_tied_default(&b, I, def);
+               }
             }
 
-            /* Now just drop the default source */
-            jay_shrink_sources(I, I->num_srcs - 1);
-            I->predication = JAY_PREDICATED;
+            /* Now just drop the default sources */
+            jay_shrink_sources(I, I->num_srcs - (I->predication - 1));
+            I->predication = 1;
+         }
+
+         /* For a non-uniform shuffle, we need to make sure a0 has valid
+          * contents in all lanes, not just active lanes, due to hardware
+          * bugs. brw & igc do the same.
+          */
+         if ((I->op == JAY_OPCODE_SHUFFLE && !jay_is_uniform(I->src[1])) &&
+             !a0_valid) {
+
+            jay_MOV(&b, jay_bare_regs(J_ADDRESS, 0, 8), 0);
+            a0_valid = true;
+         } else if (I->dst.file == J_ADDRESS) {
+            /* Assume we're writing a message descriptor or something */
+            a0_valid = false;
          }
 
          if (I->zero_inactive) {
             if (!BITSET_TEST(inactive_are_0, I->cond_flag.reg)) {
-               jay_MOV(&b, I->cond_flag, 0)->type =
-                  JAY_TYPE_U | func->shader->dispatch_width;
+               jay_MOV(&b, I->cond_flag, 0)->type = jay_flag_type(func);
                BITSET_SET(inactive_are_0, I->cond_flag.reg);
             }
 
@@ -160,10 +182,10 @@ pass(jay_function *func)
             if (!jay_is_null(I->cond_flag) && I->uniform) {
                BITSET_CLEAR(inactive_are_0, I->cond_flag.reg);
             }
+         }
 
-            if (lower(&b, I)) {
-               jay_remove_instruction(I);
-            }
+         if (lower(&b, I)) {
+            jay_remove_instruction(I);
          }
       }
    }

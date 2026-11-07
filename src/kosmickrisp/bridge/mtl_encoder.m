@@ -80,6 +80,42 @@ mtl_wait_for_fence(void *encoder, mtl_fence *fence,
    }
 }
 
+void
+mtl_encoder_set_label(void *encoder, const char *label)
+{
+   @autoreleasepool {
+      id<MTL4CommandEncoder> enc = (id<MTL4CommandEncoder>)encoder;
+      enc.label = @(label);
+   }
+}
+
+void
+mtl_encoder_insert_debug_signpost(void *encoder, const char *label)
+{
+   @autoreleasepool {
+      id<MTL4CommandEncoder> enc = (id<MTL4CommandEncoder>)encoder;
+      [enc insertDebugSignpost:@(label)];
+   }
+}
+
+void
+mtl_encoder_push_debug_group(void *encoder, const char *label)
+{
+   @autoreleasepool {
+      id<MTL4CommandEncoder> enc = (id<MTL4CommandEncoder>)encoder;
+      [enc pushDebugGroup:@(label)];
+   }
+}
+
+void
+mtl_encoder_pop_debug_group(void *encoder)
+{
+   @autoreleasepool {
+      id<MTL4CommandEncoder> enc = (id<MTL4CommandEncoder>)encoder;
+      [enc popDebugGroup];
+   }
+}
+
 /* MTLComputeEncoder */
 mtl_compute_encoder *
 mtl_new_compute_command_encoder(mtl_command_buffer *cmd_buffer)
@@ -228,6 +264,16 @@ mtl_dispatch_threadgroups_with_indirect_buffer(mtl_compute_encoder *encoder,
    }
 }
 
+void
+mtl_dispatch_threads_with_indirect_buffer(mtl_compute_encoder *encoder,
+                                          uint64_t addr)
+{
+   @autoreleasepool {
+      id<MTL4ComputeCommandEncoder> enc = (id<MTL4ComputeCommandEncoder>)encoder;
+      [enc dispatchThreadsWithIndirectBuffer:addr];
+   }
+}
+
 /* MTLRenderEncoder */
 
 /* Encoder commands */
@@ -343,6 +389,15 @@ mtl_set_depth_clip_mode(mtl_render_encoder *encoder,
    @autoreleasepool {
       id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
       [enc setDepthClipMode:(MTLDepthClipMode)mode];
+   }
+}
+
+void
+mtl_set_depth_test_bounds(mtl_render_encoder *encoder, float min, float max)
+{
+   @autoreleasepool {
+      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
+      [enc setDepthTestMinBound:min maxBound:max];
    }
 }
 

@@ -21,9 +21,13 @@
 void
 rc_init(struct radeon_compiler *c, const struct rc_regalloc_state *rs)
 {
+   const linear_opts pool_opts = {
+      .min_buffer_size = 8192,
+   };
+
    memset(c, 0, sizeof(*c));
 
-   memory_pool_init(&c->Pool);
+   c->Pool = linear_context_with_opts(NULL, &pool_opts);
    c->Program.Instructions.Prev = &c->Program.Instructions;
    c->Program.Instructions.Next = &c->Program.Instructions;
    c->Program.Instructions.U.I.Opcode = RC_OPCODE_ILLEGAL_OPCODE;
@@ -35,7 +39,7 @@ void
 rc_destroy(struct radeon_compiler *c)
 {
    rc_constants_destroy(&c->Program.Constants);
-   memory_pool_destroy(&c->Pool);
+   linear_free_context(c->Pool);
    free(c->ErrorMsg);
 }
 
@@ -103,7 +107,14 @@ rc_mark_unused_channels(struct radeon_compiler *c, void *user)
    for (struct rc_instruction *inst = c->Program.Instructions.Next;
         inst != &c->Program.Instructions; inst = inst->Next) {
 
-      rc_compute_sources_for_writemask(inst, inst->U.I.DstReg.WriteMask, srcmasks);
+      unsigned int writemask = inst->U.I.DstReg.WriteMask;
+      /* R500 predicates can write ALUResult without writing a register. */
+      if (inst->U.I.WriteALUResult == RC_ALURESULT_X)
+         writemask |= RC_MASK_X;
+      else if (inst->U.I.WriteALUResult == RC_ALURESULT_W)
+         writemask |= RC_MASK_W;
+
+      rc_compute_sources_for_writemask(inst, writemask, srcmasks);
 
       for (unsigned int src = 0; src < 3; ++src) {
          for (unsigned int chan = 0; chan < 4; ++chan) {

@@ -1246,11 +1246,10 @@ pub(super) fn convert_spirv_to_nir(
     build: &DeviceProgramBuild,
     name: &CStr,
     args: &[spirv::SPIRVKernelArg],
-    spec_constants: &mut HashMap<u32, Vec<u8>>,
     dev: &'static Device,
 ) -> Result<SPIRVToNirResult, &'static CStr> {
     let cache = dev.screen().shader_cache();
-    let key = build.hash_key(cache.as_ref(), name, spec_constants, &dev.lib_clc);
+    let key = build.hash_key(cache.as_ref(), name, &dev.lib_clc);
     let spirv_info = build.kernel_info(name).unwrap();
 
     match cache
@@ -1260,7 +1259,7 @@ pub(super) fn convert_spirv_to_nir(
     {
         Some(entry) => Ok(entry),
         None => {
-            let nir = build.to_nir(name, dev, spec_constants)?;
+            let nir = build.to_nir(name, dev)?;
 
             if Platform::dbg().nir {
                 eprintln!("=== Printing nir for {name:?} after spirv_to_nir");
@@ -1554,7 +1553,7 @@ impl Kernel {
         }
 
         for i in 0..work_dim {
-            let dim_log = grid[0].trailing_zeros().min(subgroup_log);
+            let dim_log = grid[i].trailing_zeros().min(subgroup_log);
             let dim_pot = 1 << dim_log;
 
             subgroup_log -= dim_log;
@@ -1974,11 +1973,33 @@ impl Kernel {
 
             let (resources, mut globals) = exec_builder.get_resources_and_globals();
 
+            let mut read_barriers = 0;
+            let mut write_barriers = 0;
+            if !resources.is_empty() || !bdas.is_empty() {
+                read_barriers |= PIPE_BARRIER_MAPPED_BUFFER
+                    | PIPE_BARRIER_SHADER_BUFFER
+                    | PIPE_BARRIER_UPDATE_BUFFER;
+                write_barriers |= PIPE_BARRIER_MAPPED_BUFFER
+                    | PIPE_BARRIER_SHADER_BUFFER
+                    | PIPE_BARRIER_UPDATE_BUFFER;
+            }
+            if !sviews.is_empty() {
+                read_barriers |= PIPE_BARRIER_TEXTURE | PIPE_BARRIER_UPDATE_TEXTURE;
+            }
+            if !iviews.is_empty() {
+                // TODO: skip this if there are only write_only images
+                read_barriers |= PIPE_BARRIER_IMAGE | PIPE_BARRIER_UPDATE_TEXTURE;
+                write_barriers |=
+                    PIPE_BARRIER_IMAGE | PIPE_BARRIER_TEXTURE | PIPE_BARRIER_UPDATE_TEXTURE;
+            }
+
             ctx.bind_kernel(&nir_kernel_builds, variant)?;
             ctx.bind_sampler_states(samplers);
             ctx.bind_sampler_views(sviews);
             ctx.bind_shader_images(iviews);
             ctx.set_global_binding(resources, &mut globals);
+
+            ctx.memory_barrier(read_barriers);
 
             for z in 0..grid[2].div_ceil(hw_max_grid[2]) {
                 for y in 0..grid[1].div_ceil(hw_max_grid[1]) {
@@ -2011,9 +2032,8 @@ impl Kernel {
                 }
             }
 
+            ctx.memory_barrier(write_barriers);
             ctx.clear_global_binding(globals.len() as u32);
-
-            ctx.memory_barrier(PIPE_BARRIER_SHADER_BUFFER);
 
             if let Some(printf_buf) = &printf_buf {
                 let tx = ctx

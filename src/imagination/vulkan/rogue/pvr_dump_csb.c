@@ -282,12 +282,14 @@ print_block_cdmctrl_kernel(struct pvr_dump_csb_ctx *const csb_ctx,
       goto end_pop_ctx;
    words_read += 1;
 
-   if (!pvr_dump_csb_block_take_packed(&ctx, CDMCTRL_KERNEL9, &kernel9) ||
-       !pvr_dump_csb_block_take_packed(&ctx, CDMCTRL_KERNEL10, &kernel10) ||
-       !pvr_dump_csb_block_take_packed(&ctx, CDMCTRL_KERNEL11, &kernel11)) {
-      goto end_pop_ctx;
+   if (kernel0.event_object_present) {
+      if (!pvr_dump_csb_block_take_packed(&ctx, CDMCTRL_KERNEL9, &kernel9) ||
+          !pvr_dump_csb_block_take_packed(&ctx, CDMCTRL_KERNEL10, &kernel10) ||
+          !pvr_dump_csb_block_take_packed(&ctx, CDMCTRL_KERNEL11, &kernel11)) {
+         goto end_pop_ctx;
+      }
+      words_read += 3;
    }
-   words_read += 3;
 
    pvr_dump_field_member_bool(base_ctx, &kernel0, indirect_present);
    pvr_dump_field_member_bool(base_ctx, &kernel0, global_offsets_present);
@@ -1872,7 +1874,8 @@ print_block_ppp_state_stream_out(struct pvr_dump_csb_ctx *const csb_ctx,
          device,
          BUFFER_TYPE_NONE,
          PVR_DEV_ADDR_OFFSET(pds_heap_base, stream_out2.pds_data_addr.addr),
-         stream_out1.pds_data_size,
+         stream_out1.pds_data_size *
+            ROGUE_TA_STATE_STREAM_OUT1_PDS_DATA_SIZE_UNIT_SIZE,
          "pds_data_size");
       if (!ret)
          goto end_pop_ctx;
@@ -2388,7 +2391,7 @@ void pvr_csb_dump(const struct pvr_csb *const csb,
 
    pvr_bo_store_dump(device);
 
-   pvr_dump_begin(&root_ctx, stderr, "CONTROL STREAM DUMP", 6);
+   pvr_dump_begin(&root_ctx, stderr, "CONTROL STREAM DUMP", 10);
 
    pvr_dump_field_u32(&root_ctx, "Frame num", frame_num);
    pvr_dump_field_u32(&root_ctx, "Job num", job_num);

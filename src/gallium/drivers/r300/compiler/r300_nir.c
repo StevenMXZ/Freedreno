@@ -172,6 +172,33 @@ remove_clip_vertex(nir_builder *b, nir_instr *instr, UNUSED void *_)
 }
 
 static bool
+r300_should_scalarize_bcsel(const nir_alu_instr *alu)
+{
+   /* Scalarize bcsels that update a single vector component, such as:
+    *
+    * 32x3 %a = vec3 %new1, %old.y, %old.z
+    * 32x3 %b = vec3 %new2, %old.y, %old.z
+    * 32x3 %c = bcsel %cond.xxx, %a, %b
+    *
+    * The selects for the unchanged components fold away and the remaining
+    * scalar select can expose optimizations such as fmin/fmax.
+    */
+   unsigned num_different = 0;
+
+   for (unsigned i = 0; i < alu->def.num_components; i++) {
+      nir_scalar src1 = nir_scalar_resolved(alu->src[1].src.ssa,
+                                            alu->src[1].swizzle[i]);
+      nir_scalar src2 = nir_scalar_resolved(alu->src[2].src.ssa,
+                                            alu->src[2].swizzle[i]);
+
+      if (!nir_scalar_equal(src1, src2) && ++num_different > 1)
+         return false;
+   }
+
+   return num_different == 1;
+}
+
+static bool
 r300_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
 {
    if (instr->type != nir_instr_type_alu)
@@ -192,6 +219,8 @@ r300_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
    case nir_op_bany_inequal3:
    case nir_op_bany_inequal4:
       return true;
+   case nir_op_bcsel:
+      return r300_should_scalarize_bcsel(alu);
    default:
       break;
    }
@@ -233,6 +262,8 @@ r300_optimize_nir(struct nir_shader *s, struct r300_screen *screen)
     * emit warning and hope for the best. */
    if (s->info.stage == MESA_SHADER_FRAGMENT && !is_r500)
       NIR_PASS(_, s, r300_nir_stub_deriv);
+
+   NIR_PASS(_, s, nir_opt_reassociate_matrix_mul);
 
    bool progress;
    do {

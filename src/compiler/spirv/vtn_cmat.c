@@ -98,6 +98,16 @@ vtn_cast_pointer_to_byte_pointer(struct vtn_builder *b, struct vtn_pointer *p)
    return vtn_cast_pointer(b, p, t);
 }
 
+static bool
+desc_type_is_signed(const struct glsl_type *type)
+{
+   if (type->cmat_desc.element_type == GLSL_TYPE_INT8 ||
+       type->cmat_desc.element_type == GLSL_TYPE_INT16 ||
+       type->cmat_desc.element_type == GLSL_TYPE_INT)
+      return true;
+   return false;
+}
+
 void
 vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
                                    const uint32_t *w, unsigned count)
@@ -202,12 +212,32 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
+   case SpvOpCooperativeMatrixGetCoordinateEXT: {
+      nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
+      nir_def *coord = vtn_get_nir_ssa(b, w[4]);
+      nir_def *def = nir_cmat_get_coordinate(&b->nb, coord, .cmat_desc = src->type->cmat_desc);
+      vtn_push_nir_ssa(b, w[2], def);
+      break;
+   }
+
    case SpvOpCooperativeMatrixConvertNV: {
+      struct vtn_value *val = vtn_untyped_value(b, w[2]);
       struct vtn_type *dst_type = vtn_get_type(b, w[1]);
       nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
+      const bool transpose = vtn_has_decoration(b, val, SpvDecorationCooperativeMatrixTransposeEXT);
+      unsigned signed_mask = 0;
+
+      if (desc_type_is_signed(dst_type->type))
+         signed_mask |= NIR_CMAT_RESULT_SIGNED;
+
+      if (desc_type_is_signed(src->type))
+         signed_mask |= NIR_CMAT_A_SIGNED;
 
       nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_convert_nv");
-      nir_cmat_convert(&b->nb, &dst->def, &src->def);
+      if (transpose)
+         nir_cmat_transpose(&b->nb, &dst->def, &src->def, .cmat_signed_mask = signed_mask);
+      else
+         nir_cmat_convert(&b->nb, &dst->def, &src->def, .cmat_signed_mask = signed_mask);
       vtn_push_var_ssa(b, w[2], dst->var);
       break;
    }
@@ -215,14 +245,21 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpCooperativeMatrixTransposeNV: {
       struct vtn_type *dst_type = vtn_get_type(b, w[1]);
       nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
+      unsigned signed_mask = 0;
+
+      if (desc_type_is_signed(dst_type->type))
+         signed_mask |= NIR_CMAT_RESULT_SIGNED;
+
+      if (desc_type_is_signed(src->type))
+         signed_mask |= NIR_CMAT_A_SIGNED;
 
       nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_transpose_nv");
-      nir_cmat_transpose(&b->nb, &dst->def, &src->def);
+      nir_cmat_transpose(&b->nb, &dst->def, &src->def, .cmat_signed_mask = signed_mask);
       vtn_push_var_ssa(b, w[2], dst->var);
       break;
    }
 
-   case SpvOpCooperativeMatrixReduceNV: {
+   case SpvOpCooperativeMatrixReduceEXT: {
       struct vtn_type *dst_type = vtn_get_type(b, w[1]);
       nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
 
@@ -230,7 +267,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
 
       reduce_fn->referenced = true;
       reduce_fn->nir_func->cmat_call = true;
-      nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_reduce_nv");
+      nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_reduce");
       nir_cmat_call_instr *call = nir_cmat_call_instr_create(b->nb.shader, nir_cmat_call_op_reduce, reduce_fn->nir_func);
       call->params[0] = nir_src_for_ssa(&dst->def);
       call->params[1] = nir_src_for_ssa(&src->def);
@@ -240,7 +277,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
-   case SpvOpCooperativeMatrixPerElementOpNV: {
+   case SpvOpCooperativeMatrixPerElementOpEXT: {
       struct vtn_type *dst_type = vtn_get_type(b, w[1]);
       nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
 
@@ -248,7 +285,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
 
       per_element_fn->referenced = true;
       per_element_fn->nir_func->cmat_call = true;
-      nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_per_element_nv");
+      nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_per_element");
 
       nir_cmat_call_instr *call = nir_cmat_call_instr_create(b->nb.shader, nir_cmat_call_op_per_element_op, per_element_fn->nir_func);
       call->params[0] = nir_src_for_ssa(&dst->def);
@@ -430,9 +467,14 @@ vtn_handle_cooperative_alu(struct vtn_builder *b, struct vtn_value *dest_val,
             (vtn_convert_op_dst_type(opcode) == nir_type_int ? NIR_CMAT_RESULT_SIGNED : 0);
 
          const bool saturate = vtn_has_decoration(b, dest_val, SpvDecorationSaturatedToLargestFloat8NormalConversionEXT);
+         const bool transpose = vtn_has_decoration(b, dest_val, SpvDecorationCooperativeMatrixTransposeEXT);
 
          nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_convert");
-         nir_cmat_convert(&b->nb, &dst->def, &src->def, .saturate = saturate, .cmat_signed_mask = signed_mask);
+
+         if (transpose)
+            nir_cmat_transpose(&b->nb, &dst->def, &src->def, .saturate = saturate, .cmat_signed_mask = signed_mask);
+         else
+            nir_cmat_convert(&b->nb, &dst->def, &src->def, .saturate = saturate, .cmat_signed_mask = signed_mask);
          vtn_push_var_ssa(b, w[2], dst->var);
 
          break;
@@ -545,10 +587,11 @@ vtn_create_internal_uint_type(struct vtn_builder *b) {
 }
 
 static struct vtn_type *
-vtn_create_internal_tvec_type(struct vtn_builder *b, int dim) {
+vtn_create_internal_tvec_type(struct vtn_builder *b, enum glsl_base_type base_type,
+                              int dim) {
    struct vtn_type *t = vtn_zalloc(b, struct vtn_type);
    t->base_type = vtn_base_type_vector;
-   t->type = glsl_vector_type(GLSL_TYPE_UINT, dim);
+   t->type = glsl_vector_type(base_type, dim);
    return t;
 }
 
@@ -559,7 +602,8 @@ vtn_handle_tensor_layout_type(struct vtn_builder *b, struct vtn_value *val,
    int dim = vtn_constant_uint(b, w[2]);
    int num_fields = 6;
 
-   struct vtn_type *vec_type = vtn_create_internal_tvec_type(b, dim);
+   struct vtn_type *uvec_type = vtn_create_internal_tvec_type(b, GLSL_TYPE_UINT, dim);
+   struct vtn_type *vec_type = vtn_create_internal_tvec_type(b, GLSL_TYPE_INT, dim);
    struct vtn_type *uint_type = vtn_create_internal_uint_type(b);
 
    if (opcode == SpvOpTypeTensorLayoutNV) {
@@ -567,10 +611,13 @@ vtn_handle_tensor_layout_type(struct vtn_builder *b, struct vtn_value *val,
       val->type->tensor_layout_clamp_mode = vtn_constant_uint(b, w[3]);
       val->type->tensor_layout_members = vtn_alloc_array(b, struct vtn_type *, num_fields);
 
-      for (unsigned i = 0; i < 5; i++) {
-         val->type->tensor_layout_members[i] = vec_type;
-      }
-      val->type->tensor_layout_members[5] = uint_type;
+      struct vtn_type **members = val->type->tensor_layout_members;
+      members[NIR_TENSOR_LAYOUT_BLOCKSIZE]   = uvec_type;
+      members[NIR_TENSOR_LAYOUT_LAYOUT_DIM]  = uvec_type;
+      members[NIR_TENSOR_LAYOUT_STRIDE]      = uvec_type;
+      members[NIR_TENSOR_LAYOUT_OFFSET]      = vec_type;
+      members[NIR_TENSOR_LAYOUT_SPAN]        = uvec_type;
+      members[NIR_TENSOR_LAYOUT_CLAMP_VALUE] = uint_type;
 
 #define FILL_ST_FIELD(idx, ftype, fname) \
       fields[(idx)] = (struct glsl_struct_field) {   \
@@ -602,10 +649,10 @@ vtn_handle_tensor_layout_type(struct vtn_builder *b, struct vtn_value *val,
       val->type->tensor_view_members = vtn_alloc_array(b, struct vtn_type *, num_fields);
 
       for (unsigned i = 0; i < 2; i++) {
-         val->type->members[i] = vec_type;
+         val->type->tensor_view_members[i] = uvec_type;
       }
       for (unsigned i = 2; i < 6; i++) {
-         val->type->members[i] = uint_type;
+         val->type->tensor_view_members[i] = uint_type;
       }
 
       STACK_ARRAY(struct glsl_struct_field, fields, num_fields);
@@ -669,8 +716,7 @@ init_clip_scalars(struct vtn_builder *b,
       uint32_t this_index = index_base + f;
       struct vtn_ssa_value *field = vtn_composite_extract(b, src, &this_index, 1);
       struct vtn_ssa_value *new_field = vtn_create_ssa_value(b, field->type);
-      int nc = glsl_get_vector_elements(field->type);
-      assert(nc <= 1);
+      assert(glsl_get_vector_elements(field->type) <= 1);
       new_field->def = vtn_get_nir_ssa(b, w[4 + f]);
 
       new = vtn_composite_insert(b, new, src_type, new_field, &this_index, 1);

@@ -96,7 +96,10 @@ impl Format {
         self.supports_texturing(dev) && !self.is_integer()
     }
 
-    pub fn supports_buffer(&self) -> bool {
+    pub fn supports_buffer(&self, dev: &nv_device_info) -> bool {
+        if dev.cls_eng3d < clb097::MAXWELL_A && self.is_srgb() {
+            return false;
+        }
         self.info().support() & NIL_FORMAT_SUPPORTS_BUFFER_BIT != 0
     }
 
@@ -124,7 +127,7 @@ impl Format {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format_supports_texturing(
     dev: &nv_device_info,
     p_format: pipe_format,
@@ -132,7 +135,7 @@ pub extern "C" fn nil_format_supports_texturing(
     Format::try_from(p_format).is_ok_and(|f| f.supports_texturing(dev))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format_supports_filtering(
     dev: &nv_device_info,
     p_format: pipe_format,
@@ -140,15 +143,15 @@ pub extern "C" fn nil_format_supports_filtering(
     Format::try_from(p_format).is_ok_and(|f| f.supports_filtering(dev))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format_supports_buffer(
-    _dev: &nv_device_info,
+    dev: &nv_device_info,
     p_format: pipe_format,
 ) -> bool {
-    Format::try_from(p_format).is_ok_and(|f| f.supports_buffer())
+    Format::try_from(p_format).is_ok_and(|f| f.supports_buffer(dev))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format_supports_storage(
     dev: &nv_device_info,
     p_format: pipe_format,
@@ -156,7 +159,7 @@ pub extern "C" fn nil_format_supports_storage(
     Format::try_from(p_format).is_ok_and(|f| f.supports_storage(dev))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format_supports_color_targets(
     dev: &nv_device_info,
     p_format: pipe_format,
@@ -164,7 +167,7 @@ pub extern "C" fn nil_format_supports_color_targets(
     Format::try_from(p_format).is_ok_and(|f| f.supports_color_targets(dev))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format_supports_blending(
     dev: &nv_device_info,
     p_format: pipe_format,
@@ -172,7 +175,7 @@ pub extern "C" fn nil_format_supports_blending(
     Format::try_from(p_format).is_ok_and(|f| f.supports_blending(dev))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format_supports_depth_stencil(
     dev: &nv_device_info,
     p_format: pipe_format,
@@ -180,17 +183,17 @@ pub extern "C" fn nil_format_supports_depth_stencil(
     Format::try_from(p_format).is_ok_and(|f| f.supports_depth_stencil(dev))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format_to_color_target(p_format: pipe_format) -> u32 {
     Format::try_from(p_format).unwrap().info().czt()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format_to_depth_stencil(p_format: pipe_format) -> u32 {
     Format::try_from(p_format).unwrap().info().czt()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_format(p_format: pipe_format) -> Format {
     p_format.try_into().unwrap()
 }

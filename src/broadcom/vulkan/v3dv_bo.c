@@ -28,16 +28,6 @@
 #include <sys/mman.h>
 
 #include "util/perf/cpu_trace.h"
-#include "util/u_memory.h"
-
-/* Default max size of the bo cache, in MB.
- *
- * This value comes from testing different Vulkan application. Greater values
- * didn't get any further performance benefit. This looks somewhat small, but
- * from testing those applications, the main consumer of the bo cache are
- * the bos used for the CLs, that are usually small.
- */
-#define DEFAULT_MAX_BO_CACHE_SIZE 64
 
 /* Discarded to use a V3D_DEBUG for this, as it would mean adding a run-time
  * check for most of the calls
@@ -131,7 +121,9 @@ bo_free(struct v3dv_device *device,
       return true;
 
    assert(p_atomic_read(&bo->refcnt) == 0);
-   assert(bo->map == NULL);
+
+   if (bo->map)
+      v3dv_bo_unmap(device, bo);
 
    if (!bo->is_import) {
       device->bo_count--;
@@ -192,7 +184,7 @@ v3dv_bo_init(struct v3dv_bo *bo,
              uint64_t report_id,
              VkObjectType obj_type,
              uint64_t obj_handle,
-             bool private)
+             bool is_private)
 {
    p_atomic_set(&bo->refcnt, 1);
    bo->handle = handle;
@@ -202,7 +194,7 @@ v3dv_bo_init(struct v3dv_bo *bo,
    bo->map = NULL;
    bo->map_size = 0;
    bo->name = name;
-   bo->private = private;
+   bo->is_private = is_private;
    bo->dumb_handle = -1;
    bo->is_import = false;
    bo->is_self_import = false;
@@ -220,7 +212,7 @@ v3dv_bo_init_import(struct v3dv_bo *bo,
                     uint32_t offset,
                     VkObjectType obj_type,
                     uint64_t obj_handle,
-                    bool private)
+                    bool is_private)
 {
    if (bo->refcnt > 0) {
       p_atomic_inc(&bo->refcnt);
@@ -230,7 +222,7 @@ v3dv_bo_init_import(struct v3dv_bo *bo,
    }
 
    v3dv_bo_init(bo, handle, size, offset, "import", handle,
-                obj_type, obj_handle, private);
+                obj_type, obj_handle, is_private);
    bo->is_import = true;
 }
 
@@ -238,7 +230,7 @@ struct v3dv_bo *
 v3dv_bo_alloc(struct v3dv_device *device,
               uint32_t size,
               const char *name,
-              bool private,
+              bool is_private,
               VkObjectType obj_type,
               uint64_t obj_handle)
 {
@@ -248,7 +240,7 @@ v3dv_bo_alloc(struct v3dv_device *device,
    size = align(size, page_align);
    uint64_t report_id = (uint64_t)p_atomic_inc_return(&device->bo_report_id);
 
-   if (private) {
+   if (is_private) {
       bo = bo_from_cache(device, size, name);
       if (bo) {
          if (dump_stats) {
@@ -258,11 +250,12 @@ v3dv_bo_alloc(struct v3dv_device *device,
          bo->report_obj_type = obj_type;
          bo->report_obj_handle = obj_handle;
          bo->report_id = (report_id << 32) | bo->handle;
-         v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                       true, /* is_alloc */
-                                       false, /* is_import */
-                                       bo->report_id, bo->size,
-                                       obj_type, obj_handle);
+         vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                      true, /* is_alloc */
+                                      false, /* is_import */
+                                      bo->report_id, bo->size,
+                                      obj_type, obj_handle,
+                                      0 /* heap_index */);
          return bo;
       }
    }
@@ -282,11 +275,12 @@ retry:
       }
 
       mesa_loge("Failed to allocate device memory for BO\n");
-      v3dv_emit_device_memory_report(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                                     true, /* is_alloc */
-                                     false, /* is_import */
-                                     0, /* mem_obj_id */
-                                     size, obj_type, obj_handle);
+      vk_device_memory_report_emit(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                                   true, /* is_alloc */
+                                   false, /* is_import */
+                                   0, /* mem_obj_id */
+                                   size, obj_type, obj_handle,
+                                   0 /* heap_index */);
       return NULL;
    }
 
@@ -299,13 +293,13 @@ retry:
    /* Private BOs may be recycled from the cache, so bo->handle
     * alone would not be a valid report_id.
     */
-   if (private)
+   if (is_private)
       report_id = (report_id << 32) | create.handle;
    else
       report_id = create.handle;
 
    v3dv_bo_init(bo, create.handle, size, create.offset, name,
-                report_id, obj_type, obj_handle, private);
+                report_id, obj_type, obj_handle, is_private);
 
    device->bo_count++;
    device->bo_size += bo->size;
@@ -314,11 +308,12 @@ retry:
       bo_dump_stats(device);
    }
 
-   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                  true, /* is_alloc */
-                                  false, /* is_import */
-                                  report_id, bo->size,
-                                  obj_type, obj_handle);
+   vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                true, /* is_alloc */
+                                false, /* is_import */
+                                report_id, bo->size,
+                                obj_type, obj_handle,
+                                0 /* heap_index */);
    return bo;
 }
 
@@ -329,8 +324,11 @@ v3dv_bo_map_unsynchronized(struct v3dv_device *device,
 {
    assert(bo != NULL && size <= bo->size);
 
-   if (bo->map)
-      return bo->map;
+   if (bo->map) {
+      if (bo->map_size >= size)
+         return true;
+      v3dv_bo_unmap(device, bo);
+   }
 
    struct drm_v3d_mmap_bo map;
    memset(&map, 0, sizeof(map));
@@ -441,6 +439,8 @@ reallocate_size_list(struct v3dv_bo_cache *cache,
 void
 v3dv_bo_cache_init(struct v3dv_device *device)
 {
+   mtx_init(&device->bo_cache.lock, mtx_plain);
+
    device->bo_size = 0;
    device->bo_count = 0;
    list_inithead(&device->bo_cache.time_list);
@@ -451,7 +451,7 @@ v3dv_bo_cache_init(struct v3dv_device *device)
 
    const char *max_cache_size_str = os_get_option("V3DV_MAX_BO_CACHE_SIZE");
    if (max_cache_size_str == NULL)
-      device->bo_cache.max_cache_size = DEFAULT_MAX_BO_CACHE_SIZE;
+      device->bo_cache.max_cache_size = V3D_DEFAULT_MAX_BO_CACHE_SIZE;
    else
       device->bo_cache.max_cache_size = atoll(max_cache_size_str);
 
@@ -476,6 +476,8 @@ v3dv_bo_cache_destroy(struct v3dv_device *device)
       mesa_loge("BO stats after screen destroy:\n");
       bo_dump_stats(device);
    }
+
+   mtx_destroy(&device->bo_cache.lock);
 }
 
 
@@ -525,22 +527,20 @@ v3dv_bo_free(struct v3dv_device *device,
     */
    mem_report_obj_handle = mem_report_obj_handle ?
                            mem_report_obj_handle : bo->report_obj_handle;
-   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                  false, /* is_alloc */
-                                  bo->is_import, bo->report_id, bo->size,
-                                  bo->report_obj_type, mem_report_obj_handle);
+   vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                false, /* is_alloc */
+                                bo->is_import, bo->report_id, bo->size,
+                                bo->report_obj_type, mem_report_obj_handle,
+                                0 /* heap_index */);
 
    if (!p_atomic_dec_zero(&bo->refcnt))
       return true;
-
-   if (bo->map)
-      v3dv_bo_unmap(device, bo);
 
    struct timespec time;
    struct v3dv_bo_cache *cache = &device->bo_cache;
    uint32_t page_index = bo->size / 4096 - 1;
 
-   if (bo->private &&
+   if (bo->is_private &&
        bo->size > cache->max_cache_size - cache->cache_size) {
       clock_gettime(CLOCK_MONOTONIC, &time);
       mtx_lock(&cache->lock);
@@ -548,7 +548,7 @@ v3dv_bo_free(struct v3dv_device *device,
       mtx_unlock(&cache->lock);
    }
 
-   if (!bo->private ||
+   if (!bo->is_private ||
        bo->size > cache->max_cache_size - cache->cache_size) {
       return bo_free(device, bo);
    }

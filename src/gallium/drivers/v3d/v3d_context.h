@@ -101,6 +101,10 @@ void v3d_job_add_bo(struct v3d_job *job, struct v3d_bo *bo);
 #define V3D_JOB_MAX_SCISSORS 16
 #define V3D_JOB_MAX_BO_HANDLE_COUNT 2048
 #define V3D_JOB_MAX_BO_REFERENCED_SIZE (768 * 1024 * 1024)
+/* Keeps the amount of queued GPU work in the range where the kernel does not
+ * reset. Less than 500ms of work in a tile.
+ */
+#define V3D_JOB_MAX_DRAW_CALLS_QUEUED 16384
 
 enum v3d_sampler_state_variant {
         V3D_SAMPLER_STATE_BORDER_0000,
@@ -602,7 +606,7 @@ struct v3d_context {
 
         struct v3d_compiler_state *compiler_state;
 
-        uint8_t prim_mode;
+        enum mesa_prim prim_mode;
 
         /** Maximum index buffer valid for the current shader_rec. */
         uint32_t max_index;
@@ -734,6 +738,7 @@ struct v3d_rasterizer_state {
 
         uint8_t depth_offset[9];
         uint8_t depth_offset_z16[9];
+        uint8_t depth_offset_z24[9];
 };
 
 struct v3d_depth_stencil_alpha_state {
@@ -812,6 +817,9 @@ v3d_transform_feedback_enabled(struct v3d_context *v3d)
 }
 
 void v3d_set_shader_uniform_dirty_flags(struct v3d_compiled_shader *shader);
+void v3d_upload_shader_code(struct v3d_context *v3d,
+                            struct v3d_compiled_shader *shader,
+                            const uint64_t *qpu_insts, uint32_t qpu_size);
 struct v3d_cl_reloc v3d_write_uniforms(struct v3d_context *v3d,
                                        struct v3d_job *job,
                                        struct v3d_compiled_shader *shader,
@@ -840,7 +848,7 @@ void v3d_flush_jobs_reading_resource(struct v3d_context *v3d,
                                      struct pipe_resource *prsc,
                                      enum v3d_flush_cond flush_cond,
                                      bool is_compute_pipeline);
-void v3d_update_compiled_shaders(struct v3d_context *v3d, uint8_t prim_mode);
+void v3d_update_compiled_shaders(struct v3d_context *v3d, enum mesa_prim prim_mode);
 void v3d_update_compiled_cs(struct v3d_context *v3d);
 
 bool v3d_rt_format_is_emulated(enum pipe_format f);
@@ -857,6 +865,8 @@ const uint8_t *v3d_get_format_swizzle(const struct v3d_device_info *devinfo,
                                       enum pipe_format f);
 bool v3d_format_supports_tlb_resolve_and_blend(const struct v3d_device_info *devinfo,
                                                enum pipe_format f);
+bool v3d_format_supports_filtering(const struct v3d_device_info *devinfo,
+                                   enum pipe_format f);
 bool v3d_format_needs_tlb_rb_swap(enum pipe_format format);
 void v3d_format_get_internal_type_and_bpp(const struct v3d_device_info *devinfo,
                                           enum pipe_format format,

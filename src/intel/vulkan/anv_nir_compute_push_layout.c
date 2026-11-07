@@ -53,31 +53,46 @@ adjust_driver_push_values(nir_shader *nir,
        * the shader.
        */
       const uint32_t push_reg_mask_start =
-         anv_drv_const_offset(gfx.push_reg_mask[nir->info.stage]);
-      assert(anv_drv_const_size(gfx.push_reg_mask[nir->info.stage]) <= 4);
+         anv_drv_const_offset(drv_data.gfx.push_reg_mask[nir->info.stage]);
+      assert(anv_drv_const_size(drv_data.gfx.push_reg_mask[nir->info.stage]) <= 4);
       BITSET_SET(data->push_dwords, push_reg_mask_start / 4);
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       if (push_info->fragment_dynamic) {
-         const uint32_t fs_config_start = anv_drv_const_offset(gfx.fs_config);
-         assert(anv_drv_const_size(gfx.fs_config) <= 4);
+         const uint32_t fs_config_start =
+            anv_drv_const_offset(drv_data.gfx.fs_config);
+         assert(anv_drv_const_size(drv_data.gfx.fs_config) <= 4);
          BITSET_SET(data->push_dwords, fs_config_start / 4);
       }
 
       if (data->needs_wa_18019110168) {
          const uint32_t fs_per_prim_remap_start =
-            anv_drv_const_offset(gfx.wa_18019110168);
-         assert(anv_drv_const_size(gfx.wa_18019110168) <= 4);
+            anv_drv_const_offset(drv_data.gfx.wa_18019110168);
+         assert(anv_drv_const_size(drv_data.gfx.wa_18019110168) <= 4);
          BITSET_SET(data->push_dwords, fs_per_prim_remap_start / 4);
+      }
+
+      if (push_info->use_fs_color_offset) {
+         const uint32_t fs_color_offset_start =
+            anv_drv_const_offset(drv_data.gfx.fs_color_offset);
+         assert(anv_drv_const_size(drv_data.gfx.fs_color_offset) <= 4);
+         BITSET_SET(data->push_dwords, fs_color_offset_start / 4);
+      }
+
+      if (push_info->use_fs_color_map) {
+         const uint32_t fs_color_map_start =
+            anv_drv_const_offset(drv_data.gfx.fs_color_map);
+         assert(anv_drv_const_size(drv_data.gfx.fs_color_map) <= 4);
+         BITSET_SET(data->push_dwords, fs_color_map_start / 4);
       }
    }
 
    if (nir->info.stage == MESA_SHADER_MESH &&
        brw_nir_mesh_shader_needs_wa_18019110168(devinfo, nir)) {
       const uint32_t mesh_provoking_vertex_start =
-         anv_drv_const_offset(gfx.wa_18019110168);
-      assert(anv_drv_const_size(gfx.wa_18019110168) <= 4);
+         anv_drv_const_offset(drv_data.gfx.wa_18019110168);
+      assert(anv_drv_const_size(drv_data.gfx.wa_18019110168) <= 4);
       BITSET_SET(data->push_dwords, mesh_provoking_vertex_start / 4);
    }
 
@@ -88,8 +103,9 @@ adjust_driver_push_values(nir_shader *nir,
       (nir->info.stage == MESA_SHADER_TESS_EVAL &&
        push_info->separate_tessellation);
    if (data->needs_dyn_tess_config) {
-      const uint32_t tess_config_start = anv_drv_const_offset(gfx.tess_config);
-      assert(anv_drv_const_size(gfx.tess_config) <= 4);
+      const uint32_t tess_config_start =
+         anv_drv_const_offset(drv_data.gfx.tess_config);
+      assert(anv_drv_const_size(drv_data.gfx.tess_config) <= 4);
       BITSET_SET(data->push_dwords, tess_config_start / 4);
    }
 }
@@ -127,6 +143,18 @@ gather_push_data(nir_shader *nir,
             case nir_intrinsic_load_push_constant: {
                unsigned base = nir_intrinsic_base(intrin);
                unsigned range = nir_intrinsic_range(intrin);
+               /* The non-zero const case should have been handled already
+                * by anv_nir_shrink_push_constant_ranges.
+                */
+               assert(!nir_src_is_const(intrin->src[0]) ||
+                      nir_src_as_uint(intrin->src[0]) == 0);
+
+               /* If the offset is dynamic, the range may not be accurate.
+                * Take the whole thing in that case.
+                */
+               if (!nir_src_is_const(intrin->src[0]))
+                  range = MAX_PUSH_CONSTANTS_SIZE - base;
+
                BITSET_SET_RANGE(data.push_dwords,
                                 base / 4, DIV_ROUND_UP(base + range, 4) - 1);
                break;
@@ -389,17 +417,40 @@ lower_to_inline_data_intel(nir_builder *b,
     * is just packed into the inline data, the order is the same (it's just
     * packed), so even if the value is a vec3/4, once you find the first
     * matching dword, the rest will follow in the right order.
+    *
+    * The push data should be aligned to the data type (8/16/32/64 bits), but
+    * when we repack things into the inline register, we work with dwords.
+    * This means a 64bit could end up being unaligned. Deal with that case
+    * here so we don't have to add a complicated pass in the backend.
     */
    for (unsigned i = 0; i < state->bind_map->inline_dwords_count; i++) {
       if (state->bind_map->inline_dwords[i] == base / 4) {
          b->cursor = nir_before_instr(&intrin->instr);
-         nir_def *data = nir_load_inline_data_intel(
-            b,
-            intrin->def.num_components,
-            intrin->def.bit_size,
-            intrin->src[0].ssa,
-            .base = i * 4 + base % 4,
-            .range = nir_intrinsic_range(intrin));
+         const unsigned load_base = i * 4 + base % 4;
+         nir_def *data;
+         if (intrin->def.bit_size == 64 && load_base % 8 != 0) {
+            nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+            const unsigned range_per_comp = nir_intrinsic_range(intrin) / intrin->def.num_components;
+            for (unsigned c = 0; c < intrin->def.num_components; c++) {
+               comps[c] = nir_pack_64_2x32(
+                  b, nir_load_inline_data_intel(
+                     b,
+                     intrin->def.num_components * 2,
+                     intrin->def.bit_size / 2,
+                     intrin->src[0].ssa,
+                     .base = load_base + c * range_per_comp,
+                     .range = range_per_comp));
+            }
+            data = nir_vec(b, comps, intrin->def.num_components);
+         } else {
+            data = nir_load_inline_data_intel(
+               b,
+               intrin->def.num_components,
+               intrin->def.bit_size,
+               intrin->src[0].ssa,
+               .base = load_base,
+               .range = nir_intrinsic_range(intrin));
+         }
          nir_def_replace(&intrin->def, data);
          return true;
       }
@@ -444,11 +495,11 @@ lower_to_push_data_intel(nir_builder *b,
        * vkCmdDispatch*().
        */
       if (b->shader->info.stage == MESA_SHADER_COMPUTE) {
-         if (anv_drv_const_includes_offset(cs.num_workgroups, base))
+         if (anv_drv_const_includes_offset(drv_data.cs.num_workgroups, base))
             state->bind_map->binding_mask |= ANV_PIPELINE_BIND_MASK_NUM_WORKGROUP;
-         else if (anv_drv_const_includes_offset(cs.base_workgroup, base))
+         else if (anv_drv_const_includes_offset(drv_data.cs.base_workgroup, base))
                state->bind_map->binding_mask |= ANV_PIPELINE_BIND_MASK_BASE_WORKGROUP;
-         else if (anv_drv_const_includes_offset(cs.unaligned_invocations_x, base))
+         else if (anv_drv_const_includes_offset(drv_data.cs.unaligned_invocations_x, base))
             state->bind_map->binding_mask |= ANV_PIPELINE_BIND_MASK_UNALIGNED_INV_X;
       }
       nir_intrinsic_set_base(intrin, base - base_offset);
@@ -512,7 +563,7 @@ stage_has_inline_param(const struct intel_device_info *devinfo, mesa_shader_stag
 
 static struct anv_push_range
 compute_final_push_range(const nir_shader *nir,
-                         const struct intel_device_info *devinfo,
+                         const struct anv_physical_device *pdevice,
                          const struct push_data *data,
                          struct anv_pipeline_bind_map *map)
 {
@@ -548,12 +599,19 @@ compute_final_push_range(const nir_shader *nir,
     * (unlike all Gfx stages) and so we can bound+align the allocation there
     * (see anv_cmd_buffer_cs_push_constants).
     */
+   const struct intel_device_info *devinfo = &pdevice->info;
    const bool has_inline_param = stage_has_inline_param(devinfo, nir->info.stage);
+   /* COMPUTE_WALKER_2 has up to 16 dwords, but mesh/task shaders still only
+    * have the 8 dwords.
+    */
+   const uint32_t max_dwords =
+      pdevice->uses_efficient_64bit ?
+      (nir->info.stage == MESA_SHADER_COMPUTE ? 16 : 8) : 8;
 
    map->inline_dwords_count = 0;
 
    /* Can we fit all the push data in the inline parameters? */
-   if (has_inline_param && BITSET_COUNT(data->push_dwords) < 8) {
+   if (has_inline_param && BITSET_COUNT(data->push_dwords) < max_dwords) {
       unsigned i;
       map->inline_dwords_count = 0;
       BITSET_FOREACH_SET(i, data->push_dwords, PUSH_CONSTANTS_DWORDS)
@@ -576,7 +634,7 @@ compute_final_push_range(const nir_shader *nir,
 
       /* Can we fit all the driver data in the inline parameters? */
       if ((BITSET_COUNT(data->push_dwords) -
-           BITSET_PREFIX_SUM(data->push_dwords, MAX_PUSH_CONSTANTS_SIZE / 4)) <= 6) {
+           BITSET_PREFIX_SUM(data->push_dwords, MAX_PUSH_CONSTANTS_SIZE / 4)) <= (max_dwords - 2)) {
          unsigned i;
          BITSET_FOREACH_SET(i, data->push_dwords, PUSH_CONSTANTS_DWORDS) {
             /* Iterate application push constants (not driver values) */
@@ -618,7 +676,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
                        prog_key, map, NULL, NULL);
 
    struct anv_push_range push_constant_range =
-      compute_final_push_range(nir, devinfo, &data, map);
+      compute_final_push_range(nir, pdevice, &data, map);
 
    /* When platforms support Mesh and the fragment shader is not fully linked
     * to the previous shader, payload format can change if the preceding
@@ -740,7 +798,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
 
       /* Update the ranges */
       struct anv_push_range shrinked_push_constant_range =
-         compute_final_push_range(nir, devinfo, &data, map);
+         compute_final_push_range(nir, pdevice, &data, map);
       assert(shrinked_push_constant_range.length <= push_constant_range.length);
 
       if (shrinked_push_constant_range.length > 0) {
@@ -782,7 +840,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
    unsigned push_start = push_constant_range.start * 32;
    if (prog_data->robust_ubo_ranges) {
       const uint32_t push_reg_mask_offset =
-         anv_drv_const_offset(gfx.push_reg_mask[nir->info.stage]);
+         anv_drv_const_offset(drv_data.gfx.push_reg_mask[nir->info.stage]);
       assert(push_reg_mask_offset >= push_start);
       prog_data->push_reg_mask_param = (push_reg_mask_offset - push_start) / 4;
    }
@@ -792,7 +850,8 @@ anv_nir_compute_push_layout(nir_shader *nir,
       if (data.needs_dyn_tess_config) {
          struct brw_tcs_prog_data *tcs_prog_data = brw_tcs_prog_data(prog_data);
 
-         const uint32_t tess_config_offset = anv_drv_const_offset(gfx.tess_config);
+         const uint32_t tess_config_offset =
+            anv_drv_const_offset(drv_data.gfx.tess_config);
          assert(tess_config_offset >= push_start);
          tcs_prog_data->tess_config_param = tess_config_offset - push_start;
       }
@@ -802,7 +861,8 @@ anv_nir_compute_push_layout(nir_shader *nir,
       if (push_info->separate_tessellation) {
          struct brw_tes_prog_data *tes_prog_data = brw_tes_prog_data(prog_data);
 
-         const uint32_t tess_config_offset = anv_drv_const_offset(gfx.tess_config);
+         const uint32_t tess_config_offset =
+            anv_drv_const_offset(drv_data.gfx.tess_config);
          assert(tess_config_offset >= push_start);
          tes_prog_data->tess_config_param = tess_config_offset - push_start;
       }
@@ -814,24 +874,17 @@ anv_nir_compute_push_layout(nir_shader *nir,
 
       if (push_info->fragment_dynamic) {
          const uint32_t fs_config_offset =
-            anv_drv_const_offset(gfx.fs_config);
+            anv_drv_const_offset(drv_data.gfx.fs_config);
          assert(fs_config_offset >= push_start);
          fs_prog_data->fs_config_param = fs_config_offset - push_start;
-      }
-      if (data.needs_wa_18019110168) {
-         const uint32_t fs_per_prim_remap_offset =
-            anv_drv_const_offset(gfx.wa_18019110168);
-         assert(fs_per_prim_remap_offset >= push_start);
-         fs_prog_data->per_primitive_remap_param =
-            fs_per_prim_remap_offset - push_start;
       }
       break;
    }
 
    case MESA_SHADER_COMPUTE: {
       const int subgroup_id_index =
-         BITSET_TEST(data.push_dwords, anv_drv_const_offset(cs.subgroup_id) / 4) ?
-         (anv_drv_const_offset(cs.subgroup_id) - push_start) / 4 : -1;
+         BITSET_TEST(data.push_dwords, anv_drv_const_offset(subgroup_id) / 4) ?
+         (anv_drv_const_offset(subgroup_id) - push_start) / 4 : -1;
       struct brw_cs_prog_data *cs_prog_data = brw_cs_prog_data(prog_data);
       brw_cs_fill_push_const_info(devinfo, cs_prog_data, subgroup_id_index);
       break;
