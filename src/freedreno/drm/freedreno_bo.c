@@ -183,6 +183,7 @@ fd_bo_new_shared_image(struct fd_device *dev, uint32_t width, uint32_t height,
     */
    bo->bo_reuse = NO_CACHE;
    bo->alloc_flags |= FD_BO_SHARED;
+   bo->platform_shared_image = true;
 
    return bo;
 }

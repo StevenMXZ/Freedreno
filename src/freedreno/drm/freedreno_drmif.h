@@ -255,6 +255,7 @@ struct fd_bo {
       BO_CACHE = 1,
       RING_CACHE = 2,
    } bo_reuse : 2;
+   bool platform_shared_image;
 
    /* Most recent index in submit's bo table, used to optimize the common
     * case where a bo is used many times in the same submit.

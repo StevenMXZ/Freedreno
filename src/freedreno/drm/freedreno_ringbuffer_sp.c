@@ -17,6 +17,8 @@
 
 #include "freedreno_ringbuffer_sp.h"
 
+DEBUG_GET_ONCE_BOOL_OPTION(kgsl_merge_shared, "FD_MESA_KGSL_MERGE_SHARED", false)
+
 /* A "softpin" implementation of submit/ringbuffer, which lowers CPU overhead
  * by avoiding the additional tracking necessary to build cmds/relocs tables
  * (but still builds a bos table)
@@ -197,10 +199,12 @@ fd_submit_sp_new_ringbuffer(struct fd_submit *submit, uint32_t size,
  */
 static bool
 fd_submit_sp_flush_prep(struct fd_submit *submit, int in_fence_fd,
-                        struct fd_fence *out_fence)
+                        struct fd_fence *out_fence,
+                         bool *only_platform_shared)
 {
    struct fd_submit_sp *fd_submit = to_fd_submit_sp(submit);
    bool has_shared = false;
+   *only_platform_shared = true;
 
    finalize_current_cmd(submit->primary);
 
@@ -215,7 +219,10 @@ fd_submit_sp_flush_prep(struct fd_submit *submit, int in_fence_fd,
    simple_mtx_lock(&fence_lock);
    for (unsigned i = 0; i < fd_submit->nr_bos; i++) {
       fd_bo_add_fence(fd_submit->bos[i], out_fence);
-      has_shared |= fd_submit->bos[i]->alloc_flags & FD_BO_SHARED;
+      if (fd_submit->bos[i]->alloc_flags & FD_BO_SHARED) {
+         has_shared = true;
+         *only_platform_shared &= fd_submit->bos[i]->platform_shared_image;
+      }
    }
    for (unsigned i = 0; i < fd_submit->nr_suballoc_bos; i++) {
       fd_bo_add_fence(fd_submit->suballoc_bos[i], out_fence);
@@ -269,6 +276,7 @@ flush_deferred_submits(struct fd_device *dev)
    list_replace(&dev->deferred_submits, &fd_submit->submit_list);
    list_inithead(&dev->deferred_submits);
    dev->deferred_cmds = 0;
+   dev->deferred_platform_shared = false;
 
    /* If we have multiple submits with in-fence-fd's then merge them: */
    foreach_submit (submit, &fd_submit->submit_list) {
@@ -358,7 +366,14 @@ fd_submit_sp_flush(struct fd_submit *submit, int in_fence_fd, bool use_fence_fd)
    if (use_fence_fd)
       out_fence->use_fence_fd = true;
 
-   bool has_shared = fd_submit_sp_flush_prep(submit, in_fence_fd, out_fence);
+   bool only_platform_shared;
+   bool has_shared = fd_submit_sp_flush_prep(submit, in_fence_fd, out_fence,
+                                           &only_platform_shared);
+   bool merge_shared = has_shared && only_platform_shared &&
+                       submit->merge_platform_shared &&
+                       in_fence_fd == -1 && !use_fence_fd &&
+                       (dev->features & FD_FEATURE_SHARED_IMAGE) &&
+                       debug_get_option_kgsl_merge_shared();
 
    /* Having an in fence means it is explicit sync*/
    if ((in_fence_fd != -1) && !dev->disable_explicit_sync_heuristic)
@@ -379,7 +394,15 @@ fd_submit_sp_flush(struct fd_submit *submit, int in_fence_fd, bool use_fence_fd)
     * reference to the fd, and merged all the in-fence-fd's when we flush the
     * deferred submits
     */
-   if (!use_fence_fd && !has_shared && should_defer(submit)) {
+   /* Only internal AHB dependency batches may bypass the shared-buffer
+    * rule. Flush their merged work at the final batch, and do not defer
+    * across a new input fence or the publication of an output fence.
+    */
+   if (!use_fence_fd && in_fence_fd == -1 &&
+       (!has_shared || merge_shared) &&
+       (!dev->deferred_platform_shared || submit->merge_platform_shared) &&
+       should_defer(submit)) {
+      dev->deferred_platform_shared |= merge_shared;
       DEBUG_MSG("defer: %u", submit->fence);
       dev->deferred_cmds += fd_ringbuffer_cmd_count(submit->primary);
       assert(dev->deferred_cmds == fd_dev_count_deferred_cmds(dev));
