@@ -183,6 +183,12 @@ fd_pipe_wait_timeout(struct fd_pipe *pipe, const struct fd_fence *fence,
 
    fd_pipe_flush(pipe, fence->ufence);
 
+   /* Submission and queue synchronization may already have retired the fence.
+    * Recheck the same userspace completion word before entering the kernel.
+    */
+   if (!fd_fence_after(fence->ufence, pipe->control->fence))
+      return 0;
+
    return pipe->funcs->wait(pipe, fence, timeout);
 }
 

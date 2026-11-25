@@ -196,7 +196,23 @@ kgsl_pipe_new(struct fd_device *dev, enum fd_pipe_id id, unsigned prio)
                KGSL_CONTEXT_PREAMBLE,
    };
 
-   if (kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req)) {
+   /* Gallium uses lower numeric priorities for higher priority contexts.
+    * KGSL reserves zero for the kernel-selected default (normally 8).
+    * Leave the normal and internal probe contexts at that default.
+    */
+   const unsigned base_flags = req.flags;
+   if (prio == 0)
+      req.flags |= 1u << KGSL_CONTEXT_PRIORITY_SHIFT;
+   else if (prio >= 3)
+      req.flags |= 15u << KGSL_CONTEXT_PRIORITY_SHIFT;
+
+   int ret = kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
+   if (ret && req.flags != base_flags &&
+       (errno == EINVAL || errno == EPERM || errno == EACCES)) {
+      req = (struct kgsl_drawctxt_create) { .flags = base_flags };
+      ret = kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
+   }
+   if (ret) {
       ERROR_MSG("DRAWCTXT_CREATE failed (%s)", strerror(errno));
       goto fail;
    }
