@@ -95,7 +95,11 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader *shader,
 
    /* nir_opt_algebraic() above would have unfused our ffmas, re-fuse them. */
    if (needs_late_alg) {
-      NIR_PASS(progress, ctx->s, nir_opt_algebraic_late);
+      bool late_progress;
+      do {
+         late_progress = false;
+         NIR_PASS(late_progress, ctx->s, nir_opt_algebraic_late);
+      } while (late_progress);
       NIR_PASS(progress, ctx->s, nir_opt_dce);
    }
 
