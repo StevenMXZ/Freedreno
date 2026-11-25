@@ -47,6 +47,12 @@ fd_submit_ref(struct fd_submit *submit)
    return submit;
 }
 
+void
+fd_submit_merge_platform_shared(struct fd_submit *submit)
+{
+   submit->merge_platform_shared = true;
+}
+
 struct fd_fence *
 fd_submit_flush(struct fd_submit *submit, int in_fence_fd, bool use_fence_fd)
 {

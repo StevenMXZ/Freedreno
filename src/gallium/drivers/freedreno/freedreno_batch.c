@@ -389,6 +389,12 @@ batch_flush(struct fd_batch *batch, bool last_batch)
    if (batch->fence)
       fd_pipe_fence_ref(&batch->ctx->last_fence, batch->fence);
 
+   /* A dependency without a published fence may share a submit with its
+    * parent. Final batches must retain their normal publication boundary.
+    */
+   if (!last_batch && !batch->fence && batch->in_fence_fd == -1)
+      fd_submit_merge_platform_shared(batch->submit);
+
    fd_gmem_render_tiles(batch);
 
    assert(batch->reference.count > 0);

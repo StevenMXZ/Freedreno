@@ -81,6 +81,9 @@ struct fd_ringbuffer *fd_submit_new_ringbuffer(struct fd_submit *submit,
 /* in_fence_fd: -1 for no in-fence, else fence fd
  * if use_fence_fd is true the output fence will be dma_fence fd backed
  */
+/* Permit platform-image merging for internal dependency batches only. */
+void fd_submit_merge_platform_shared(struct fd_submit *submit);
+
 struct fd_fence *fd_submit_flush(struct fd_submit *submit, int in_fence_fd,
                                  bool use_fence_fd);
 

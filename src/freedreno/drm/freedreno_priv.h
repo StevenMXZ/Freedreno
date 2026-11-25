@@ -246,6 +246,7 @@ struct fd_device {
    struct list_head deferred_submits;
    struct fd_fence *deferred_submits_fence;
    unsigned deferred_cmds;
+   bool deferred_platform_shared;
    simple_mtx_t submit_lock;
 
    /**
@@ -409,6 +410,7 @@ struct fd_submit {
    const struct fd_submit_funcs *funcs;
 
    struct fd_ringbuffer *primary;
+   bool merge_platform_shared;
    uint32_t fence;
    struct list_head node;  /* node in fd_pipe::deferred_submits */
 };
