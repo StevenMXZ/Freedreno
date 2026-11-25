@@ -1535,6 +1535,36 @@ add_gpus([
         raw_magic_regs = a8xx_base_raw_magic_regs,
     ))
 
+# Medium VPC cache sizes from Mesa MR 46240, with MR 46551's correction.
+a8xx_vpc_cache_med = GPUProps(
+        sysmem_vpc_attr_buf_size = 128 * 1024,
+        sysmem_vpc_pos_buf_size = 48 * 1024,
+        sysmem_vpc_bv_pos_buf_size = 24 * 1024,
+        gmem_vpc_attr_buf_size = 48 * 1024,
+        gmem_vpc_pos_buf_size = 24 * 1024,
+        gmem_vpc_bv_pos_buf_size = 24 * 1024,
+)
+
+# Adreno 825: Artem Peshkov, Mesa MR 46716.
+# GMEM is 2432 KiB; this snapshot obtains its size from the kernel.
+add_gpus([
+        GPUId(chip_id=0xffff44030000, name="Adreno (TM) 825"),
+    ], A6xxGPUInfo(
+        CHIP.A8XX,
+        [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen1, a8xx_vpc_cache_med],
+        num_ccu = 4,
+        num_slices = 2,
+        tile_align_w = 64,
+        tile_align_h = 32,
+        tile_max_w = 16384,
+        tile_max_h = 16384,
+        num_vsc_pipes = 32,
+        cs_shared_mem_size = 32 * 1024,
+        wave_granularity = 2,
+        fibers_per_sp = 64 * 2 * 32,
+        raw_magic_regs = a8xx_base_raw_magic_regs,
+    ))
+
 add_gpus([
         GPUId(chip_id=0xffff44030a20, name="Adreno (TM) 829"),
         GPUId(chip_id=0x44030a20, name="Adreno (TM) 829"), # KGSL
@@ -1542,8 +1572,20 @@ add_gpus([
         CHIP.A8XX,
         [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,
          GPUProps(
-            shading_rate_matches_vk = True,  # TODO confirm this
+            shading_rate_matches_vk = True,
             sysmem_vpc_bv_pos_buf_size = 24576,
+            sysmem_ccu_color_cache_fraction = CCUColorCacheFraction.FULL.value,
+            sysmem_per_ccu_color_cache_size = 128 * 1024,
+            sysmem_ccu_depth_cache_fraction = CCUColorCacheFraction.HALF.value,
+            sysmem_per_ccu_depth_cache_size = 128 * 1024,
+            # DVD: corrected VPC offsets based on A825 dumps.
+            gmem_vpc_attr_buf_size = 49152,
+            gmem_vpc_pos_buf_size = 24576,
+            gmem_vpc_bv_pos_buf_size = 32768,
+            gmem_ccu_color_cache_fraction = CCUColorCacheFraction.HALF.value,
+            gmem_per_ccu_color_cache_size = 128 * 1024,
+            gmem_ccu_depth_cache_fraction = CCUColorCacheFraction.HALF.value,
+            gmem_per_ccu_depth_cache_size = 128 * 1024,
          )],
         num_ccu = 4,
         num_slices = 2,
@@ -1631,6 +1673,29 @@ add_gpus([
         cs_shared_mem_size = 32 * 1024,
         wave_granularity = 2,
         fibers_per_sp = 128 * 2 * 16,
+        raw_magic_regs = a8xx_base_raw_magic_regs,
+    ))
+
+# Experimental A850 (Hawi): A840-derived profile from lfdevs.
+add_gpus([
+        GPUId(chip_id=0x44051401, name="Adreno (TM) 850"), # DRM/MSM
+        GPUId(chip_id=0xffff44051401, name="Adreno (TM) 850"), # DRM/MSM fuse fallback
+        GPUId(chip_id=0xffff44051431, name="Adreno (TM) 850"), # KGSL
+    ], A6xxGPUInfo(
+        CHIP.A8XX,
+        [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,
+         GPUProps(shading_rate_matches_vk = True)],
+        num_ccu = 6,
+        num_slices = 3,
+        tile_align_w = 96,
+        tile_align_h = 32,
+        tile_max_w = 16416,
+        tile_max_h = 16384,
+        num_vsc_pipes = 32,
+        cs_shared_mem_size = 32 * 1024,
+        wave_granularity = 2,
+        fibers_per_sp = 128 * 2 * 16,
+        highest_bank_bit = 16,
         raw_magic_regs = a8xx_base_raw_magic_regs,
     ))
 
