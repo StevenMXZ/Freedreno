@@ -65,6 +65,30 @@ kgsl_probe_dma_heap(struct kgsl_device *kgsl_dev)
             dma_heap_path, ion_path, strerror(errno));
 }
 
+/* Probe both the allocation and returned flags; some KGSL kernels silently
+ * discard IOCOHERENT. Keep write-combine as the default for unsupported GPUs.
+ */
+static bool
+kgsl_probe_cached_coherent(int fd)
+{
+   const unsigned flags = KGSL_MEMFLAGS_IOCOHERENT |
+                          (KGSL_CACHEMODE_WRITEBACK << KGSL_CACHEMODE_SHIFT);
+   struct kgsl_gpumem_alloc_id req = {
+      .size = 4096,
+      .flags = flags,
+   };
+   if (kgsl_safe_ioctl(fd, IOCTL_KGSL_GPUMEM_ALLOC_ID, &req))
+      return false;
+
+   bool supported = (req.flags & (KGSL_MEMFLAGS_IOCOHERENT |
+                                  KGSL_CACHEMODE_MASK)) == flags;
+   struct kgsl_gpumem_free_id free_req = { .id = req.id };
+   if (kgsl_safe_ioctl(fd, IOCTL_KGSL_GPUMEM_FREE_ID, &free_req))
+      return false;
+
+   return supported;
+}
+
 struct fd_device *
 kgsl_device_new(int fd)
 {
@@ -94,6 +118,7 @@ kgsl_device_new(int fd)
    dev->bo_size = sizeof(struct kgsl_bo);
 
    kgsl_probe_dma_heap(kgsl_dev);
+   dev->has_cached_coherent = kgsl_probe_cached_coherent(fd);
 
    /* async submit_queue used for softpin deferred submits */
    util_queue_init(&dev->submit_queue, "sq", 8, 1, 0, NULL);

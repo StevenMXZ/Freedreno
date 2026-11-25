@@ -622,10 +622,8 @@ kgsl_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
    if (flags & FD_BO_GPUREADONLY)
       req.flags |= KGSL_MEMFLAGS_GPUREADONLY;
 
-   /* Note that dev->has_cached_coherent is never set for kgsl, so the
-    * common layer strips FD_BO_CACHED_COHERENT before we get here and the
-    * writecombine path is always taken.  Enabling it would need a runtime
-    * probe that KGSL_MEMFLAGS_IOCOHERENT actually works on this kernel.
+   /* The device probe checks whether KGSL preserves both coherent and
+    * writeback flags. The common allocator strips the flag otherwise.
     */
    if (flags & FD_BO_CACHED_COHERENT)
       req.flags |= KGSL_MEMFLAGS_IOCOHERENT |
