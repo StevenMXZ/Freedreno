@@ -115,11 +115,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REVISION: ${{ inputs.revision }}
         run: |
-          release_flags=()
-          if grep -q devel mesa/VERSION; then release_flags+=(--prerelease); fi
           gh release create "freedreno-dri3-${{ steps.package.outputs.sha }}-${{ github.run_number }}-${{ github.run_attempt }}" \
             "mesa/Freedreno-DRI3-${{ steps.package.outputs.sha }}.zip" \
             --repo "$GITHUB_REPOSITORY" --target "${{ steps.package.outputs.full_sha }}" \
-            "${release_flags[@]}" \
             --title "Freedreno DRI3 ${{ inputs.source_ref }}-R$REVISION (${{ steps.package.outputs.sha }})" \
             --notes "Mesa ${{ steps.package.outputs.version }} | revision: R$REVISION | source: ${{ inputs.source_ref }} @ ${{ steps.package.outputs.full_sha }}. Import the ZIP through Ludashi Components, then select it under Freedreno OpenGL. Requires a compatible Winlator Bionic runtime."
