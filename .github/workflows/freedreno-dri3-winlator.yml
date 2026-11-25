@@ -4,10 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Mesa branch/ref to build
+        description: Mesa version to build
         required: true
-        default: freedreno-dri3-mesa-27
-        type: string
+        default: '26.3.0'
+        type: choice
+        options:
+          - '26.3.0'
+          - '27.0.0'
 
 permissions:
   contents: write
@@ -73,6 +76,8 @@ jobs:
         run: |
           sha=$(cat mesa/.freedreno-dri3-build-sha)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "full_sha=$(git -C mesa rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(cat mesa/VERSION)" >> "$GITHUB_OUTPUT"
 
       - name: Package minimal importable OpenGL driver
         run: |
@@ -96,7 +101,7 @@ jobs:
           if grep -q devel mesa/VERSION; then release_flags+=(--prerelease); fi
           gh release create "freedreno-dri3-${{ steps.package.outputs.sha }}-${{ github.run_number }}-${{ github.run_attempt }}" \
             "mesa/Freedreno-DRI3-${{ steps.package.outputs.sha }}.zip" \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --target "${{ steps.package.outputs.full_sha }}" \
             "${release_flags[@]}" \
-            --title "Freedreno DRI3 ${{ steps.package.outputs.sha }}" \
-            --notes "Import the ZIP through Ludashi Components, then select it under Freedreno OpenGL. Requires a compatible Winlator Bionic runtime."
+            --title "Freedreno DRI3 ${{ inputs.source_ref }} (${{ steps.package.outputs.sha }})" \
+            --notes "Mesa ${{ steps.package.outputs.version }} | source: ${{ inputs.source_ref }} @ ${{ steps.package.outputs.full_sha }}. Import the ZIP through Ludashi Components, then select it under Freedreno OpenGL. Requires a compatible Winlator Bionic runtime."
