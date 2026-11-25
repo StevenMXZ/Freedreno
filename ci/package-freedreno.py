@@ -2,6 +2,7 @@
 """Create the three-file Freedreno OpenGL package accepted by Ludashi Components."""
 import argparse
 import json
+import re
 from pathlib import Path
 import struct
 import zipfile
@@ -39,7 +40,7 @@ def needed(path):
     return result
 
 
-def package(libdir, output, version):
+def package(libdir, output, version, revision=None):
     gl = libdir / 'libGL.so.1'
     if not gl.is_file():
         candidates = sorted(p for p in libdir.glob('libGL.so*') if p.is_file())
@@ -52,6 +53,13 @@ def package(libdir, output, version):
     gallium = libdir / gallium_names[0]
     needed(gallium)
     driver_version = gallium.name.removeprefix('libgallium-').removesuffix('.so')
+    if revision is not None:
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise ValueError('Revision must be a positive integer')
+        mesa_version = re.match(r'^\d+\.\d+\.\d+(?=$|[-+.])', driver_version)
+        if not mesa_version:
+            raise ValueError(f'Cannot determine Mesa version from {gallium.name}')
+        driver_version = f'{mesa_version.group()}-R{revision}'
     metadata = dict(schemaVersion=1, type='freedreno', name='Freedreno DRI3',
                     author='StevenMXZ', packageVersion=version, vendor='Mesa',
                     driverVersion=driver_version, libraryName='libGL.so.1')
@@ -68,5 +76,6 @@ if __name__ == '__main__':
     parser.add_argument('libdir', type=Path)
     parser.add_argument('output', type=Path)
     parser.add_argument('--version', required=True)
+    parser.add_argument('--revision', type=int, help='Driver revision for display metadata (e.g. 2 for R2)')
     args = parser.parse_args()
-    print(json.dumps(package(args.libdir, args.output, args.version), indent=2))
+    print(json.dumps(package(args.libdir, args.output, args.version, args.revision), indent=2))

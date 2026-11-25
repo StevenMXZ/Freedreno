@@ -45,6 +45,25 @@ class PackageTest(unittest.TestCase):
             self.assertNotIn('sourceCommit', metadata)
             self.assertNotIn('architecture', metadata)
 
+    def test_revision_changes_only_display_metadata(self):
+        for mesa_version in ('26.3.0', '27.0.0'):
+            with self.subTest(mesa_version=mesa_version):
+                name = f'libgallium-{mesa_version}-devel.so'
+                elf(self.root / 'libGL.so.1', name)
+                elf(self.root / name, 'libc.so')
+                packager.package(self.root, self.output, '42.1', revision=2)
+                with zipfile.ZipFile(self.output) as archive:
+                    meta = json.loads(archive.read('meta.json'))
+                    self.assertEqual(meta['driverVersion'], f'{mesa_version}-R2')
+                    self.assertEqual(meta['packageVersion'], '42.1')
+                    self.assertEqual(set(archive.namelist()), {'meta.json', 'libGL.so.1', name})
+                    self.assertEqual(archive.read(name), (self.root / name).read_bytes())
+
+    def test_invalid_revision_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'positive integer'):
+            packager.package(self.root, self.output, '42', revision=0)
+        self.assertFalse(self.output.exists())
+
     def test_missing_paired_gallium_fails_before_creating_zip(self):
         (self.root / 'libgallium-test.so').unlink()
         with self.assertRaises(FileNotFoundError):

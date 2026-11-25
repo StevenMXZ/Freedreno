@@ -11,6 +11,11 @@ on:
         options:
           - '26.3.0'
           - '27.0.0'
+      revision:
+        description: Driver revision number (e.g. 2 for R2)
+        required: true
+        default: '2'
+        type: string
 
 permissions:
   contents: write
@@ -25,6 +30,15 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      - name: Validate revision
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          if [[ ! "$REVISION" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Revision must be a positive integer" >&2
+            exit 1
+          fi
+
       - name: Check out selected Mesa ref
         uses: actions/checkout@v4
         with:
@@ -80,11 +94,14 @@ jobs:
           echo "version=$(cat mesa/VERSION)" >> "$GITHUB_OUTPUT"
 
       - name: Package minimal importable OpenGL driver
+        env:
+          REVISION: ${{ inputs.revision }}
         run: |
           python3 -m unittest discover -s helper/ci -p test_package_freedreno.py
           python3 helper/ci/package-freedreno.py mesa/out/usr/lib \
             "mesa/Freedreno-DRI3-${{ steps.package.outputs.sha }}.zip" \
-            --version "${{ github.run_number }}.${{ github.run_attempt }}"
+            --version "${{ github.run_number }}.${{ github.run_attempt }}" \
+            --revision "$REVISION"
 
       - name: Upload importable driver
         uses: actions/upload-artifact@v4
@@ -96,6 +113,7 @@ jobs:
       - name: Publish driver release
         env:
           GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
         run: |
           release_flags=()
           if grep -q devel mesa/VERSION; then release_flags+=(--prerelease); fi
@@ -103,5 +121,5 @@ jobs:
             "mesa/Freedreno-DRI3-${{ steps.package.outputs.sha }}.zip" \
             --repo "$GITHUB_REPOSITORY" --target "${{ steps.package.outputs.full_sha }}" \
             "${release_flags[@]}" \
-            --title "Freedreno DRI3 ${{ inputs.source_ref }} (${{ steps.package.outputs.sha }})" \
-            --notes "Mesa ${{ steps.package.outputs.version }} | source: ${{ inputs.source_ref }} @ ${{ steps.package.outputs.full_sha }}. Import the ZIP through Ludashi Components, then select it under Freedreno OpenGL. Requires a compatible Winlator Bionic runtime."
+            --title "Freedreno DRI3 ${{ inputs.source_ref }}-R$REVISION (${{ steps.package.outputs.sha }})" \
+            --notes "Mesa ${{ steps.package.outputs.version }} | revision: R$REVISION | source: ${{ inputs.source_ref }} @ ${{ steps.package.outputs.full_sha }}. Import the ZIP through Ludashi Components, then select it under Freedreno OpenGL. Requires a compatible Winlator Bionic runtime."
