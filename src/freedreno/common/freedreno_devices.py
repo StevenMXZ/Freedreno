@@ -1491,14 +1491,20 @@ a8xx_gen2 = GPUProps(
         has_salu_int_narrowing_quirk = True
 )
 
+a8xx_vpc_cache_sm = GPUProps(
+        sysmem_vpc_attr_buf_size = 32 * 1024,
+        sysmem_vpc_pos_buf_size = 12 * 1024,
+        sysmem_vpc_bv_pos_buf_size = 20 * 1024,
+        gmem_vpc_attr_buf_size = 16 * 1024,
+        gmem_vpc_pos_buf_size = 12 * 1024,
+        gmem_vpc_bv_pos_buf_size = 20 * 1024,
+)
+
 add_gpus([
        GPUId(chip_id=0xffff44010000, name="Adreno (TM) 810"),
     ], A6xxGPUInfo(
         CHIP.A8XX,
-        [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen1, GPUProps(
-            gmem_vpc_attr_buf_size = 16384,
-            gmem_vpc_pos_buf_size = 12288,
-            gmem_vpc_bv_pos_buf_size = 20480,
+        [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen1, a8xx_vpc_cache_sm, GPUProps(
             # This is possibly also needed for a830 (and all of a8xx),
             # move to a8xx_base if confirmed needed for a830.
             has_fs_tex_prefetch = False,
@@ -1571,18 +1577,13 @@ add_gpus([
         GPUId(chip_id=0x44030a20, name="Adreno (TM) 829"), # KGSL
     ], A6xxGPUInfo(
         CHIP.A8XX,
-        [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,
+        [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2, a8xx_vpc_cache_med,
          GPUProps(
             shading_rate_matches_vk = True,
-            sysmem_vpc_bv_pos_buf_size = 24576,
             sysmem_ccu_color_cache_fraction = CCUColorCacheFraction.FULL.value,
             sysmem_per_ccu_color_cache_size = 128 * 1024,
             sysmem_ccu_depth_cache_fraction = CCUColorCacheFraction.HALF.value,
             sysmem_per_ccu_depth_cache_size = 128 * 1024,
-            # DVD: corrected VPC offsets based on A825 dumps.
-            gmem_vpc_attr_buf_size = 49152,
-            gmem_vpc_pos_buf_size = 24576,
-            gmem_vpc_bv_pos_buf_size = 32768,
             gmem_ccu_color_cache_fraction = CCUColorCacheFraction.HALF.value,
             gmem_per_ccu_color_cache_size = 128 * 1024,
             gmem_ccu_depth_cache_fraction = CCUColorCacheFraction.HALF.value,
